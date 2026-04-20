@@ -1,0 +1,435 @@
+[project]
+name = "ha-github-copilot"
+version = "0.1.0"
+description = "Home Assistant integration for GitHub Copilot"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["custom_components/github_copilot"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+
+[tool.pylint.MAIN]
+py-version = "3.12"
+jobs = 2
+load-plugins = [
+  "pylint.extensions.code_style",
+  "pylint.extensions.typing",
+  "pylint_per_file_ignores",
+]
+persistent = false
+fail-on = ["I"]
+
+[tool.pylint.BASIC]
+class-const-naming-style = "any"
+
+[tool.pylint."MESSAGES CONTROL"]
+# Reasons disabled:
+# format - handled by ruff
+# locally-disabled - it spams too much
+# duplicate-code - unavoidable
+# cyclic-import - doesn't test if both import on load
+# unused-argument - generic callbacks and setup methods create a lot of warnings
+# too-many-* - are not enforced for the sake of readability
+# too-few-* - same as too-many-*
+# abstract-method - with intro of async there are always methods missing
+# inconsistent-return-statements - doesn't handle raise
+# too-many-ancestors - it's too strict
+# wrong-import-order - isort guards this
+# possibly-used-before-assignment - too many false positives
+# ---
+# Pylint CodeStyle plugin
+# consider-using-namedtuple-or-dataclass - too opinionated
+# consider-using-assignment-expr - decision to use := better left to devs
+disable = [
+  "format",
+  "abstract-method",
+  "cyclic-import",
+  "duplicate-code",
+  "inconsistent-return-statements",
+  "locally-disabled",
+  "not-context-manager",
+  "too-few-public-methods",
+  "too-many-ancestors",
+  "too-many-arguments",
+  "too-many-instance-attributes",
+  "too-many-lines",
+  "too-many-locals",
+  "too-many-public-methods",
+  "too-many-boolean-expressions",
+  "too-many-positional-arguments",
+  "wrong-import-order",
+  "consider-using-namedtuple-or-dataclass",
+  "consider-using-assignment-expr",
+  "possibly-used-before-assignment",
+
+  # Handled by ruff
+  # Ref: <https://github.com/astral-sh/ruff/issues/970>
+  "await-outside-async",
+  "bad-str-strip-call",
+  "bad-string-format-type",
+  "bidirectional-unicode",
+  "continue-in-finally",
+  "duplicate-bases",
+  "misplaced-bare-raise",
+  "format-needs-mapping",
+  "function-redefined",
+  "invalid-all-object",
+  "invalid-character-backspace",
+  "invalid-character-esc",
+  "invalid-character-nul",
+  "invalid-character-sub",
+  "invalid-character-zero-width-space",
+  "logging-too-few-args",
+  "logging-too-many-args",
+  "missing-format-string-key",
+  "mixed-format-string",
+  "no-method-argument",
+  "no-self-argument",
+  "nonexistent-operator",
+  "nonlocal-without-binding",
+  "not-in-loop",
+  "notimplemented-raised",
+  "return-in-init",
+  "return-outside-function",
+  "syntax-error",
+  "too-few-format-args",
+  "too-many-format-args",
+  "too-many-star-expressions",
+  "truncated-format-string",
+  "undefined-all-variable",
+  "undefined-variable",
+  "used-prior-global-declaration",
+  "yield-inside-async-function",
+  "yield-outside-function",
+  "anomalous-backslash-in-string",
+  "assert-on-string-literal",
+  "assert-on-tuple",
+  "bad-format-string",
+  "bad-format-string-key",
+  "bare-except",
+  "binary-op-exception",
+  "cell-var-from-loop",
+  "duplicate-except",
+  "duplicate-key",
+  "duplicate-string-formatting-argument",
+  "duplicate-value",
+  "eval-used",
+  "exec-used",
+  "expression-not-assigned",
+  "f-string-without-interpolation",
+  "forgotten-debug-statement",
+  "format-string-without-interpolation",
+  "global-variable-not-assigned",
+  "implicit-str-concat",
+  "import-outside-toplevel",
+  "import-self",
+  "inconsistent-quotes",
+  "invalid-envvar-default",
+  "keyword-arg-before-vararg",
+  "logging-format-interpolation",
+  "logging-fstring-interpolation",
+  "logging-not-lazy",
+  "misplaced-future",
+  "named-expr-without-context",
+  "nested-min-max",
+  "pointless-statement",
+  "raise-missing-from",
+  "redefined-builtin",
+  "try-except-raise",
+  "unused-argument",
+  "unused-format-string-argument",
+  "unused-format-string-key",
+  "unused-import",
+  "unused-variable",
+  "useless-else-on-loop",
+  "wildcard-import",
+  "bad-classmethod-argument",
+  "consider-iterating-dictionary",
+  "empty-docstring",
+  "invalid-name",
+  "line-too-long",
+  "missing-class-docstring",
+  "missing-final-newline",
+  "missing-function-docstring",
+  "missing-module-docstring",
+  "multiple-imports",
+  "singleton-comparison",
+  "subprocess-run-check",
+  "superfluous-parens",
+  "ungrouped-imports",
+  "unidiomatic-typecheck",
+  "unnecessary-direct-lambda-call",
+  "unnecessary-lambda-assignment",
+  "unnecessary-pass",
+  "unneeded-not",
+  "useless-import-alias",
+  "wrong-import-position",
+  "comparison-of-constants",
+  "comparison-with-itself",
+  "consider-alternative-union-syntax",
+  "consider-merging-isinstance",
+  "consider-using-alias",
+  "consider-using-dict-comprehension",
+  "consider-using-generator",
+  "consider-using-get",
+  "consider-using-set-comprehension",
+  "consider-using-sys-exit",
+  "consider-using-ternary",
+  "literal-comparison",
+  "property-with-parameters",
+  "super-with-arguments",
+  "too-many-branches",
+  "too-many-return-statements",
+  "too-many-statements",
+  "trailing-comma-tuple",
+  "unnecessary-comprehension",
+  "use-a-generator",
+  "use-dict-literal",
+  "use-list-literal",
+  "useless-object-inheritance",
+  "useless-return",
+  "no-else-break",
+  "no-else-continue",
+  "no-else-raise",
+  "no-else-return",
+  "broad-except",
+  "protected-access",
+  "broad-exception-raised",
+  "consider-using-f-string",
+]
+enable = [
+  "use-symbolic-message-instead",
+]
+per-file-ignores = [
+  "tests/.*:redefined-outer-name,use-implicit-booleaness-not-comparison",
+]
+
+[tool.pylint.REPORTS]
+score = false
+
+[tool.pylint.TYPECHECK]
+ignored-classes = [
+  "_CountingAttr",
+]
+mixin-class-rgx = ".*[Mm]ix[Ii]n"
+
+[tool.pylint.FORMAT]
+expected-line-ending-format = "LF"
+
+[tool.pylint.EXCEPTIONS]
+overgeneral-exceptions = [
+  "builtins.BaseException",
+  "builtins.Exception",
+]
+
+[tool.pylint.TYPING]
+runtime-typing = false
+
+[tool.pylint.CODE_STYLE]
+max-line-length-suggestions = 72
+
+[tool.ruff]
+required-version = ">=0.15.11"
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+  "A001",   # Variable {name} is shadowing a Python builtin
+  "ASYNC",  # flake8-async
+  "B002",   # Python does not support the unary prefix increment
+  "B005",   # Using .strip() with multi-character strings is misleading
+  "B007",   # Loop control variable {name} not used within loop body
+  "B009",   # Do not call getattr with a constant attribute value
+  "B014",   # Exception handler with duplicate exception
+  "B015",   # Pointless comparison
+  "B017",   # pytest.raises(BaseException) should be considered evil
+  "B018",   # Found useless attribute access
+  "B023",   # Function definition does not bind loop variable {name}
+  "B024",   # Abstract base class with no abstract methods
+  "B025",   # try-except block with duplicate exception
+  "B026",   # Star-arg unpacking after a keyword argument is strongly discouraged
+  "B032",   # Possible unintentional type annotation
+  "B035",   # Dictionary comprehension uses static key
+  "B904",   # Use raise from to specify exception cause
+  "B905",   # zip() without an explicit strict= parameter
+  "BLE",
+  "C",      # complexity
+  "COM818", # Trailing comma on bare tuple prohibited
+  "D",      # docstrings
+  "DTZ003", # Use datetime.now(tz=) instead of datetime.utcnow()
+  "DTZ004", # Use datetime.fromtimestamp(ts, tz=) instead
+  "E",      # pycodestyle
+  "F",      # pyflakes/autoflake
+  "FLY",    # flynt
+  "FURB",   # refurb
+  "G",      # flake8-logging-format
+  "I",      # isort
+  "INP",    # flake8-no-pep420
+  "ISC",    # flake8-implicit-str-concat
+  "ICN001", # import conventions
+  "LOG",    # flake8-logging
+  "N804",   # First argument of a class method should be named cls
+  "N805",   # First argument of a method should be named self
+  "N815",   # Variable in class scope should not be mixedCase
+  "PERF",   # Perflint
+  "PGH",    # pygrep-hooks
+  "PIE",    # flake8-pie
+  "PL",     # pylint
+  "PT",     # flake8-pytest-style
+  "PTH",    # flake8-pathlib
+  "PYI",    # flake8-pyi
+  "RET",    # flake8-return
+  "RSE",    # flake8-raise
+  "RUF005", # Consider iterable unpacking instead of concatenation
+  "RUF006", # Store a reference to the return value of asyncio.create_task
+  "RUF007", # Prefer itertools.pairwise()
+  "RUF008", # Do not use mutable default values for dataclass attributes
+  "RUF010", # Use explicit conversion flag
+  "RUF013", # PEP 484 prohibits implicit Optional
+  "RUF016", # Slice in indexed access uses wrong type
+  "RUF017", # Avoid quadratic list summation
+  "RUF018", # Avoid assignment expressions in assert statements
+  "RUF019", # Unnecessary key check before dictionary access
+  "RUF020", # {never_like} | T is equivalent to T
+  "RUF021", # Parenthesize a and b expressions when chaining
+  "RUF022", # Sort __all__
+  "RUF023", # Sort __slots__
+  "RUF024", # Do not pass mutable objects as values to dict.fromkeys
+  "RUF026", # default_factory is a positional-only argument to defaultdict
+  "RUF030", # print() call in assert statement
+  "RUF032", # Decimal() called with float literal argument
+  "RUF033", # __post_init__ method with argument defaults
+  "RUF034", # Useless if-else condition
+  "RUF059", # unused-unpacked-variable
+  "RUF100", # Unused noqa directive
+  "RUF101", # noqa directives that use redirected rule codes
+  "RUF200", # Failed to parse pyproject.toml
+  "S102",   # Use of exec detected
+  "S103",   # bad-file-permissions
+  "S108",   # hardcoded-temp-file
+  "S306",   # suspicious-mktemp-usage
+  "S307",   # suspicious-eval-usage
+  "S313",   # suspicious-xmlc-element-tree-usage
+  "S314",   # suspicious-xml-element-tree-usage
+  "S315",   # suspicious-xml-expat-reader-usage
+  "S316",   # suspicious-xml-expat-builder-usage
+  "S317",   # suspicious-xml-sax-usage
+  "S318",   # suspicious-xml-mini-dom-usage
+  "S319",   # suspicious-xml-pull-dom-usage
+  "S601",   # paramiko-call
+  "S602",   # subprocess-popen-with-shell-equals-true
+  "S604",   # call-with-shell-equals-true
+  "S608",   # hardcoded-sql-expression
+  "S609",   # unix-command-wildcard-injection
+  "SIM",    # flake8-simplify
+  "SLF",    # flake8-self
+  "SLOT",   # flake8-slots
+  "T100",   # Trace found: {name} used
+  "T20",    # flake8-print
+  "TC",     # flake8-type-checking
+  "TID",    # Tidy imports
+  "TRY",    # tryceratops
+  "UP",     # pyupgrade
+  "W",      # pycodestyle
+]
+
+ignore = [
+  "ASYNC109", # Async function with timeout parameter
+  "ASYNC110", # Use asyncio.Event instead of awaiting asyncio.sleep in while loop
+  "ASYNC240", # Use an async function for entering the file system
+  "D202",     # No blank lines allowed after function docstring
+  "D203",     # 1 blank line required before class docstring
+  "D213",     # Multi-line docstring summary should start at the second line
+  "D406",     # Section name should end with a newline
+  "D407",     # Section name underlining
+  "D417",     # Missing argument descriptions in docstring
+  "E501",     # line too long
+
+  "PLC1901", # can be simplified as empty string is falsey
+  "PLR0911", # Too many return statements
+  "PLR0912", # Too many branches
+  "PLR0913", # Too many arguments to function call
+  "PLR0915", # Too many statements
+  "PLR2004", # Magic value used in comparison
+  "PLW0108", # Unnecessary lambda wrapping
+  "PLW1641", # __eq__ without __hash__
+  "PLW2901", # Outer variable overwritten by inner target
+  "PT011",   # pytest.raises is too broad
+  "PT018",   # Assertion should be broken down
+
+  "SIM102",  # Use a single if statement instead of nested if
+  "SIM103",  # Return the condition directly
+  "SIM108",  # Use ternary operator
+  "SIM115",  # Use context handler for opening files
+
+  # Moving imports into type-checking blocks can mess with pytest.patch()
+  "TC001", # Move application import into a type-checking block
+  "TC002", # Move third-party import into a type-checking block
+  "TC003", # Move standard library import into a type-checking block
+  "TC006", # Add quotes to type expression in typing.cast()
+
+  "TRY003", # Avoid specifying long messages outside the exception class
+  "TRY400", # Use logging.exception instead of logging.error
+
+  "UP046", # Non PEP 695 generic class
+  "UP047", # Non PEP 696 generic function
+  "UP049", # Avoid private type parameter names
+
+  # May conflict with the formatter
+  "W191",
+  "E111",
+  "E114",
+  "E117",
+  "D206",
+  "D300",
+
+  # Disabled because ruff does not understand type of __all__ generated by a function
+  "PLE0605",
+
+  "FURB116",
+]
+
+[tool.ruff.lint.flake8-import-conventions.extend-aliases]
+voluptuous = "vol"
+"homeassistant.helpers.config_validation" = "cv"
+"homeassistant.helpers.device_registry" = "dr"
+"homeassistant.helpers.entity_registry" = "er"
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"async_timeout".msg = "use asyncio.timeout instead"
+"pytz".msg = "use zoneinfo instead"
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components.github_copilot"]
+combine-as-imports = true
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"custom_components/**" = ["TID252"]
+"tests/**" = ["TID252", "SLF001"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

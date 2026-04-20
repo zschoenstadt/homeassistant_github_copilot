@@ -1,0 +1,6 @@
+{
+  "name": "GitHub Copilot for Home Assistant",
+  "render_readme": true,
+  "domains": ["github_copilot"],
+  "homeassistant": "2025.7.0"
+}

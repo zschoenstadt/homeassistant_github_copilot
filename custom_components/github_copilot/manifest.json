@@ -1,0 +1,13 @@
+{
+  "domain": "github_copilot",
+  "name": "GitHub Copilot",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "after_dependencies": ["assist_pipeline", "intent"],
+  "documentation": "https://github.com/zschoenstadt/github_copilot",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}
