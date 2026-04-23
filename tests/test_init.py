@@ -7,17 +7,28 @@ from unittest.mock import patch
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from custom_components.github_copilot.api import AuthError, ConnectionError
+from custom_components.github_copilot.api import (
+    GitHubCopilotAuthError,
+    GitHubCopilotConnectionError,
+)
 
 
 async def test_async_setup_entry(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Test successful setup of a config entry."""
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -26,15 +37,21 @@ async def test_async_setup_entry(
 
 
 async def test_async_unload_entry(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Test unloading a config entry unloads platforms."""
 
-    mock_config_entry.runtime_data = mock_client
-
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -44,15 +61,25 @@ async def test_async_unload_entry(
 
 
 async def test_setup_entry_auth_failed(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Test setup with invalid token raises auth failed."""
 
-    mock_client.auth.async_validate_token.side_effect = AuthError("Token invalid")
+    mock_runtime.async_validate_tokens.side_effect = GitHubCopilotAuthError(
+        "Token invalid"
+    )
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -61,17 +88,25 @@ async def test_setup_entry_auth_failed(
 
 
 async def test_setup_entry_not_ready(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Test setup when API is unreachable."""
 
-    mock_client.auth.async_validate_token.side_effect = ConnectionError(
+    mock_runtime.async_validate_tokens.side_effect = GitHubCopilotConnectionError(
         "Cannot connect"
     )
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()

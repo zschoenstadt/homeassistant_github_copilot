@@ -12,7 +12,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.intent import IntentResponseType
 import pytest
 
-from custom_components.github_copilot.api import ApiError, AuthError
+from custom_components.github_copilot.api import (
+    GitHubCopilotApiError,
+    GitHubCopilotAuthError,
+)
+from custom_components.github_copilot.const import MAX_TOOL_ITERATIONS
 from custom_components.github_copilot.conversation import (
     GitHubCopilotConversationEntity,
 )
@@ -22,23 +26,28 @@ from .conftest import MOCK_CHAT_COMPLETION_RESPONSE
 
 @pytest.fixture
 async def setup_conversation(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Set up the conversation entity for testing."""
 
-    mock_config_entry.runtime_data = mock_client
+    mock_config_entry.runtime_data = mock_runtime
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
     return mock_config_entry
-
-
-AGENT_ID = None  # Will be set from fixture
 
 
 async def _converse(hass, text, entry, **kwargs):
@@ -57,11 +66,9 @@ async def test_entity_setup(hass: HomeAssistant, setup_conversation):
     """Test that the conversation entity is registered."""
 
     entry = setup_conversation
-    entity_id = "conversation.github_copilot_conversation"
+    entity_id = "conversation.github_copilot_client_github_copilot_conversation"
 
     hass.states.get(entity_id)
-    # Entity should exist (may or may not have a state yet)
-    # Just verify the platform loaded without error
     assert entry.state is ConfigEntryState.LOADED
 
 
@@ -77,6 +84,7 @@ async def test_handle_message_success(
     assert result.response.speech is not None
     assert "Hello" in result.response.speech["plain"]["speech"]
     mock_client.async_chat_completion.assert_called_once()
+
     # Verify the user message was passed through
     call_args = mock_client.async_chat_completion.call_args
     messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
@@ -88,32 +96,31 @@ async def test_handle_message_api_error(
 ):
     """Test message handling when API returns error."""
 
-    mock_client.async_chat_completion.side_effect = ApiError("Server error")
+    mock_client.async_chat_completion.side_effect = GitHubCopilotApiError(
+        "Server error"
+    )
 
     result = await _converse(hass, "Hello", setup_conversation)
 
-    # Should return an error response, not crash
     assert result.response.response_type == IntentResponseType.ERROR
 
 
 async def test_handle_message_auth_expired(
     hass: HomeAssistant, setup_conversation, mock_client
 ):
-    """Test message handling with expired auth triggers refresh."""
+    """Test message handling with expired auth returns error.
 
-    # First call fails with auth error, second succeeds
-    mock_client.async_chat_completion.side_effect = [
-        AuthError("Token expired"),
-        MOCK_CHAT_COMPLETION_RESPONSE,
-    ]
-    mock_client.auth.async_refresh_token.return_value = None
+    Retry logic is now inside Runtime, not the entity. The entity sees the
+    error after Runtime's retry has already failed or been handled.
+    """
+
+    mock_client.async_chat_completion.side_effect = GitHubCopilotAuthError(
+        "Token expired"
+    )
 
     result = await _converse(hass, "Hello after refresh", setup_conversation)
 
-    assert result.response.speech is not None
-    assert "Hello" in result.response.speech["plain"]["speech"]
-    mock_client.auth.async_refresh_token.assert_called_once()
-    assert mock_client.async_chat_completion.call_count == 2
+    assert result.response.response_type == IntentResponseType.ERROR
 
 
 async def test_supported_languages(hass: HomeAssistant, setup_conversation):
@@ -137,19 +144,18 @@ async def test_supported_languages(hass: HomeAssistant, setup_conversation):
 async def test_handle_message_refresh_failure(
     hass: HomeAssistant, setup_conversation, mock_client
 ):
-    """Test message handling when token refresh also fails."""
+    """Test message handling when auth error is not recoverable.
 
-    # Chat fails with auth error, refresh also fails
-    mock_client.async_chat_completion.side_effect = AuthError("Token expired")
-    mock_client.auth.async_refresh_token.side_effect = AuthError(
-        "Refresh token revoked"
+    Refresh logic is now inside Runtime. The entity just sees the final error.
+    """
+
+    mock_client.async_chat_completion.side_effect = GitHubCopilotAuthError(
+        "Token expired"
     )
 
     result = await _converse(hass, "Hello after failed refresh", setup_conversation)
 
-    # Should return an error response
     assert result.response.response_type == IntentResponseType.ERROR
-    mock_client.auth.async_refresh_token.assert_called_once()
 
 
 async def test_handle_message_no_choices(
@@ -169,7 +175,7 @@ async def test_handle_message_model_no_access(
 ):
     """Test that a 403 model access error gives a clear message."""
 
-    mock_client.async_chat_completion.side_effect = ApiError(
+    mock_client.async_chat_completion.side_effect = GitHubCopilotApiError(
         "Chat completion error 403: No access to model"
     )
 
@@ -182,19 +188,28 @@ async def test_handle_message_model_no_access(
 
 
 async def test_conversation_feature_control_flag(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
 ):
     """Test that CONTROL feature flag is set when LLM API is configured."""
 
     # Set up with LLM API configured
     hass.config_entries.async_update_entry(
-        mock_config_entry, options={"llm_hass_api": ["assist"]}
+        mock_config_entry,
+        options={**mock_config_entry.options, "llm_hass_api": ["assist"]},
     )
-    mock_config_entry.runtime_data = mock_client
+    mock_config_entry.runtime_data = mock_runtime
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -264,7 +279,6 @@ async def test_tool_calls_passed_to_api(
     result = await _converse(hass, "Use a tool please", setup_conversation)
 
     assert result.response.speech is not None
-    # Without LLM API configured, tool_calls from model are recorded but not executed
     mock_client.async_chat_completion.assert_called_once()
 
 
@@ -278,25 +292,32 @@ async def test_tools_included_in_api_payload(
     await _converse(hass, "Hello", setup_conversation)
 
     call_args = mock_client.async_chat_completion.call_args
-    # Without LLM API configured, tools should be None
     assert call_args.kwargs.get("tools") is None
 
 
 async def test_max_history_trimming(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, mock_client, setup_ha
 ):
     """Test that message history is trimmed based on max_history setting."""
 
     # Set max_history to 2
     hass.config_entries.async_update_entry(
-        mock_config_entry, options={"max_history": 2}
+        mock_config_entry, options={**mock_config_entry.options, "max_history": 2}
     )
-    mock_config_entry.runtime_data = mock_client
+    mock_config_entry.runtime_data = mock_runtime
     mock_client.async_chat_completion.return_value = MOCK_CHAT_COMPLETION_RESPONSE
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -317,27 +338,174 @@ async def test_max_history_trimming(
     # Check the last API call's messages were trimmed
     last_call = mock_client.async_chat_completion.call_args
     messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
+
     # With max_history=2, should have: system + 2 turns (4 msgs) + current user = 6-ish
-    # But definitely fewer than 5 full turns (11 messages)
     user_messages = [m for m in messages if m.get("role") == "user"]
-    # Should have at most max_history + 1 user messages (2 old + 1 current = 3)
     assert len(user_messages) <= 3
 
 
+async def test_tool_call_iteration_loop(
+    hass: HomeAssistant, mock_config_entry, mock_runtime, mock_client, setup_ha
+):
+    """Test that the tool call loop iterates when the API returns tool_calls.
+
+    First response has tool_calls → loop continues (tools execute).
+    Second response has plain text → loop exits.
+    Requires LLM API to be configured so tool results are produced.
+    """
+
+    # Configure with LLM API so tool calls are processed
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={**mock_config_entry.options, "llm_hass_api": ["assist"]},
+    )
+    mock_config_entry.runtime_data = mock_runtime
+
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    tool_call_response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "HassGetState",
+                                "arguments": json.dumps({}),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    final_response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Done! The tool worked.",
+                },
+                "finish_reason": "stop",
+            }
+        ]
+    }
+
+    # First call returns tool_calls, second returns plain text
+    mock_client.async_chat_completion.side_effect = [tool_call_response, final_response]
+
+    result = await _converse(hass, "What is the state?", mock_config_entry)
+
+    assert result.response.speech is not None
+    assert "Done! The tool worked." in result.response.speech["plain"]["speech"]
+    assert mock_client.async_chat_completion.call_count == 2
+
+
+async def test_tool_call_max_iterations_warning(
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_client,
+    setup_ha,
+    caplog,
+):
+    """Test that hitting MAX_TOOL_ITERATIONS logs a warning and returns gracefully."""
+
+    # Configure with LLM API so tool calls are processed
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        options={**mock_config_entry.options, "llm_hass_api": ["assist"]},
+    )
+    mock_config_entry.runtime_data = mock_runtime
+
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    tool_call_response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Still calling tools...",
+                    "tool_calls": [
+                        {
+                            "id": "call_loop",
+                            "type": "function",
+                            "function": {
+                                "name": "HassGetState",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    # Always return tool_calls — should hit max iterations
+    mock_client.async_chat_completion.return_value = tool_call_response
+
+    result = await _converse(hass, "Loop forever", mock_config_entry)
+
+    assert result.response.speech is not None
+    assert mock_client.async_chat_completion.call_count == MAX_TOOL_ITERATIONS
+    assert "Max tool iterations" in caplog.text
+
+
 async def test_max_history_zero_unlimited(
-    hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
+    hass: HomeAssistant, mock_config_entry, mock_runtime, mock_client, setup_ha
 ):
     """Test that max_history=0 means unlimited (no trimming)."""
 
     hass.config_entries.async_update_entry(
-        mock_config_entry, options={"max_history": 0}
+        mock_config_entry, options={**mock_config_entry.options, "max_history": 0}
     )
-    mock_config_entry.runtime_data = mock_client
+    mock_config_entry.runtime_data = mock_runtime
     mock_client.async_chat_completion.return_value = MOCK_CHAT_COMPLETION_RESPONSE
 
-    with patch(
-        "custom_components.github_copilot.GitHubCopilotClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotClient",
+        ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
@@ -358,5 +526,4 @@ async def test_max_history_zero_unlimited(
     last_call = mock_client.async_chat_completion.call_args
     messages = last_call.kwargs.get("messages") or last_call[1].get("messages", [])
     user_messages = [m for m in messages if m.get("role") == "user"]
-    # Should have all 5 user messages
     assert len(user_messages) == 5

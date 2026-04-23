@@ -23,6 +23,7 @@ The integration follows the same patterns as `openai_conversation` in HA core. W
 
 - **Entity base class**: `GitHubCopilotBaseEntity` in `entity.py` contains shared logic for converting `ChatLog` to API messages and calling the chat completions endpoint. Both `conversation.py` and `ai_task.py` inherit from it.
 - **Auth flow**: OAuth Device Flow implemented in `config_flow.py`. Tokens stored in config entry data (HA's encrypted `.storage/`). Token refresh handled in `api.py`.
+- **Config flow error recovery**: Auth errors during the device flow abort immediately — the user re-opens the flow to retry. Connection/timeout errors show a retry form (`login_timeout`) that loops back to `async_step_user` so the user can retry without restarting. Model timeout (`model_timeout`) follows the same pattern. This matches common HA core integration patterns.
 - **Error hierarchy**: `GitHubCopilotClient` defines `AuthError`, `ConnectionError`, `RateLimitError`, `ApiError`. The `__init__.py` maps `AuthError` → `ConfigEntryAuthFailed` and `ConnectionError` → `ConfigEntryNotReady`.
 
 ## Build / Test / Lint

@@ -3,26 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 from aioresponses import aioresponses
 import pytest
 
 from custom_components.github_copilot.api import (
-    ApiError,
-    AuthError,
-    ConnectionError,
-    DeviceFlowResponse,
+    GitHubCopilotApiError,
     GitHubCopilotAuth,
+    GitHubCopilotAuthError,
     GitHubCopilotClient,
-    Model,
-    RateLimitError,
-    TokenResponse,
+    GitHubCopilotConnectionError,
+    GitHubCopilotDeviceFlow,
+    GitHubCopilotModel,
+    GitHubCopilotRateLimitError,
 )
 from custom_components.github_copilot.const import (
-    CONF_ACCESS_TOKEN,
-    CONF_REFRESH_TOKEN,
     GITHUB_COPILOT_CHAT_COMPLETIONS_URL,
     GITHUB_COPILOT_MODELS_URL,
     GITHUB_COPILOT_TOKEN_URL,
@@ -46,10 +43,13 @@ from .conftest import (
 def _make_client(session: aiohttp.ClientSession) -> GitHubCopilotClient:
     """Create a client with a pre-set Copilot token (skips token exchange)."""
 
-    client = GitHubCopilotClient(
+    auth = GitHubCopilotAuth(
         session=session,
-        config={CONF_ACCESS_TOKEN: "gho_test"},
+        access_token="gho_test",
+        refresh_token=None,
+        expiry=None,
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
 
     # Pre-set Copilot token to avoid needing to mock the exchange endpoint
     client.auth._copilot_token = "copilot_test_token"
@@ -67,13 +67,10 @@ async def test_initiate_device_flow(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        result = await GitHubCopilotAuth.async_initiate_device_flow(session=session)
-        assert isinstance(result, DeviceFlowResponse)
-        assert result.device_code == "dc_test_123456"
+        result = await GitHubCopilotDeviceFlow.async_initiate(session)
+        assert isinstance(result, GitHubCopilotDeviceFlow)
         assert result.user_code == "ABCD-1234"
-        assert result.verification_uri == "https://github.com/login/device"
-        assert result.interval == 5
-        assert result.expires_in == 900
+        assert result.verification_url == "https://github.com/login/device"
     finally:
         await session.close()
 
@@ -85,8 +82,8 @@ async def test_initiate_device_flow_connection_error(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        with pytest.raises(ConnectionError):
-            await GitHubCopilotAuth.async_initiate_device_flow(session=session)
+        with pytest.raises(GitHubCopilotConnectionError):
+            await GitHubCopilotDeviceFlow.async_initiate(session)
     finally:
         await session.close()
 
@@ -98,8 +95,8 @@ async def test_initiate_device_flow_server_error(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        with pytest.raises(ConnectionError, match="500"):
-            await GitHubCopilotAuth.async_initiate_device_flow(session=session)
+        with pytest.raises(GitHubCopilotConnectionError, match="500"):
+            await GitHubCopilotDeviceFlow.async_initiate(session)
     finally:
         await session.close()
 
@@ -107,27 +104,36 @@ async def test_initiate_device_flow_server_error(aiohttp_mock):
 # ── Token Polling Tests ──
 
 
-async def test_poll_token_success(aiohttp_mock):
-    """Test successful token polling."""
+def _make_device_flow(session: aiohttp.ClientSession) -> GitHubCopilotDeviceFlow:
+    """Create a device flow instance for testing activation."""
+
+    return GitHubCopilotDeviceFlow(
+        session,
+        device_code="dc_test_123456",
+        user_code="ABCD-1234",
+        verification_uri="https://github.com/login/device",
+        interval=0,
+        expires_in=10,
+    )
+
+
+async def test_device_activation_success(aiohttp_mock):
+    """Test successful device activation (token polling)."""
 
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_RESPONSE)
 
     session = aiohttp.ClientSession()
     try:
-        result = await GitHubCopilotAuth.async_poll_for_token(
-            device_code="dc_test_123456",
-            interval=0,  # No delay for tests
-            expires_in=10,
-            session=session,
-        )
-        assert isinstance(result, TokenResponse)
+        flow = _make_device_flow(session)
+        result = await flow.async_device_activation()
+        assert isinstance(result, GitHubCopilotAuth)
         assert result.access_token == "gho_test_token_abc123"
         assert result.refresh_token == "ghr_test_refresh_xyz789"
     finally:
         await session.close()
 
 
-async def test_poll_token_pending_then_success(aiohttp_mock):
+async def test_device_activation_pending_then_success(aiohttp_mock):
     """Test polling that gets pending first, then succeeds."""
 
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_PENDING_RESPONSE)
@@ -135,18 +141,14 @@ async def test_poll_token_pending_then_success(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        result = await GitHubCopilotAuth.async_poll_for_token(
-            device_code="dc_test_123456",
-            interval=0,
-            expires_in=10,
-            session=session,
-        )
+        flow = _make_device_flow(session)
+        result = await flow.async_device_activation()
         assert result.access_token == "gho_test_token_abc123"
     finally:
         await session.close()
 
 
-async def test_poll_token_slow_down(aiohttp_mock):
+async def test_device_activation_slow_down(aiohttp_mock):
     """Test slow_down response increases interval."""
 
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_SLOW_DOWN_RESPONSE)
@@ -154,49 +156,37 @@ async def test_poll_token_slow_down(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        result = await GitHubCopilotAuth.async_poll_for_token(
-            device_code="dc_test_123456",
-            interval=0,
-            expires_in=30,
-            session=session,
-        )
+        flow = _make_device_flow(session)
+        result = await flow.async_device_activation()
         assert result.access_token == "gho_test_token_abc123"
     finally:
         await session.close()
 
 
-async def test_poll_token_expired(aiohttp_mock):
+async def test_device_activation_expired(aiohttp_mock):
     """Test expired device code."""
 
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_EXPIRED_RESPONSE)
 
     session = aiohttp.ClientSession()
     try:
-        with pytest.raises(AuthError, match="expired"):
-            await GitHubCopilotAuth.async_poll_for_token(
-                device_code="dc_test_123456",
-                interval=0,
-                expires_in=10,
-                session=session,
-            )
+        flow = _make_device_flow(session)
+        with pytest.raises(GitHubCopilotAuthError, match="expired"):
+            await flow.async_device_activation()
     finally:
         await session.close()
 
 
-async def test_poll_token_denied(aiohttp_mock):
+async def test_device_activation_denied(aiohttp_mock):
     """Test user denies authorization."""
 
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_DENIED_RESPONSE)
 
     session = aiohttp.ClientSession()
     try:
-        with pytest.raises(AuthError, match="denied"):
-            await GitHubCopilotAuth.async_poll_for_token(
-                device_code="dc_test_123456",
-                interval=0,
-                expires_in=10,
-                session=session,
-            )
+        flow = _make_device_flow(session)
+        with pytest.raises(GitHubCopilotAuthError, match="denied"):
+            await flow.async_device_activation()
     finally:
         await session.close()
 
@@ -210,18 +200,19 @@ async def test_refresh_token_success(aiohttp_mock):
     aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_RESPONSE)
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
+    auth = GitHubCopilotAuth(
         session=session,
-        config={
-            CONF_ACCESS_TOKEN: "gho_old_token",
-            CONF_REFRESH_TOKEN: "ghr_test_refresh",
-        },
+        access_token="gho_old_token",
+        refresh_token="ghr_test_refresh",
+        expiry=None,
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
+    callback = AsyncMock()
     try:
-        result = await client.auth.async_refresh_token()
-        assert result.access_token == "gho_test_token_abc123"
+        await client.auth.async_refresh_token(callback)
         assert client.auth._access_token == "gho_test_token_abc123"
         assert client.auth._refresh_token == "ghr_test_refresh_xyz789"
+        callback.assert_called_once()
     finally:
         await session.close()
 
@@ -230,11 +221,15 @@ async def test_refresh_token_no_refresh_token():
     """Test refresh when no refresh token available."""
 
     dummy_session = MagicMock(spec=aiohttp.ClientSession)
-    client = GitHubCopilotClient(
-        session=dummy_session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=dummy_session,
+        access_token="gho_test",
+        refresh_token=None,
+        expiry=None,
     )
-    with pytest.raises(AuthError, match="No refresh token"):
-        await client.auth.async_refresh_token()
+    callback = AsyncMock()
+    with pytest.raises(GitHubCopilotAuthError, match="No refresh token"):
+        await auth.async_refresh_token(callback)
 
 
 async def test_refresh_token_expired(aiohttp_mock):
@@ -246,16 +241,16 @@ async def test_refresh_token_expired(aiohttp_mock):
     )
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
+    auth = GitHubCopilotAuth(
         session=session,
-        config={
-            CONF_ACCESS_TOKEN: "gho_old",
-            CONF_REFRESH_TOKEN: "ghr_expired",
-        },
+        access_token="gho_old",
+        refresh_token="ghr_expired",
+        expiry=None,
     )
+    callback = AsyncMock()
     try:
-        with pytest.raises(AuthError, match="refresh failed"):
-            await client.auth.async_refresh_token()
+        with pytest.raises(GitHubCopilotAuthError, match="refresh failed"):
+            await auth.async_refresh_token(callback)
     finally:
         await session.close()
 
@@ -272,9 +267,10 @@ async def test_copilot_token_exchange_success(aiohttp_mock):
     )
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
-        session=session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=session, access_token="gho_test", refresh_token=None, expiry=None
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
     try:
         token = await client.auth.async_ensure_copilot_token()
         assert token == MOCK_COPILOT_TOKEN_RESPONSE["token"]
@@ -290,9 +286,12 @@ async def test_copilot_token_exchange_401(aiohttp_mock):
     aiohttp_mock.get(GITHUB_COPILOT_TOKEN_URL, status=401)
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(session=session, config={CONF_ACCESS_TOKEN: "gho_bad"})
+    auth = GitHubCopilotAuth(
+        session=session, access_token="gho_bad", refresh_token=None, expiry=None
+    )
+    client = GitHubCopilotClient(session=session, auth=auth)
     try:
-        with pytest.raises(AuthError, match="invalid or expired"):
+        with pytest.raises(GitHubCopilotAuthError, match="invalid or expired"):
             await client.auth.async_ensure_copilot_token()
     finally:
         await session.close()
@@ -308,11 +307,12 @@ async def test_copilot_token_exchange_403(aiohttp_mock):
     )
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
-        session=session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=session, access_token="gho_test", refresh_token=None, expiry=None
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
     try:
-        with pytest.raises(AuthError, match="No Copilot access"):
+        with pytest.raises(GitHubCopilotAuthError, match="No Copilot access"):
             await client.auth.async_ensure_copilot_token()
     finally:
         await session.close()
@@ -322,9 +322,10 @@ async def test_copilot_token_cached_when_valid():
     """Test that a valid cached Copilot token is reused without HTTP call."""
 
     dummy_session = MagicMock(spec=aiohttp.ClientSession)
-    client = GitHubCopilotClient(
-        session=dummy_session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=dummy_session, access_token="gho_test", refresh_token=None, expiry=None
     )
+    client = GitHubCopilotClient(session=dummy_session, auth=auth)
     client.auth._copilot_token = "cached_token"
     client.auth._copilot_token_expiry = datetime.now() + timedelta(hours=1)
 
@@ -342,9 +343,10 @@ async def test_copilot_token_refreshed_when_expired(aiohttp_mock):
     )
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
-        session=session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=session, access_token="gho_test", refresh_token=None, expiry=None
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
 
     # Set an expired token
     client.auth._copilot_token = "old_expired_token"
@@ -366,12 +368,13 @@ async def test_copilot_token_connection_error(aiohttp_mock):
     )
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
-        session=session, config={CONF_ACCESS_TOKEN: "gho_test"}
+    auth = GitHubCopilotAuth(
+        session=session, access_token="gho_test", refresh_token=None, expiry=None
     )
+    client = GitHubCopilotClient(session=session, auth=auth)
     try:
         with pytest.raises(
-            ConnectionError,
+            GitHubCopilotConnectionError,
             match="Failed to obtain Copilot token",
         ):
             await client.auth.async_ensure_copilot_token()
@@ -392,7 +395,7 @@ async def test_list_models(aiohttp_mock):
     try:
         models = await client.async_list_models()
         assert len(models) == 3
-        assert all(isinstance(m, Model) for m in models)
+        assert all(isinstance(m, GitHubCopilotModel) for m in models)
         assert models[0].id == "gpt-4.1"
         assert models[0].name == "GPT-4.1"
     finally:
@@ -407,7 +410,7 @@ async def test_list_models_401(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(AuthError):
+        with pytest.raises(GitHubCopilotAuthError):
             await client.async_list_models()
     finally:
         await session.close()
@@ -421,7 +424,7 @@ async def test_list_models_429(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(RateLimitError):
+        with pytest.raises(GitHubCopilotRateLimitError):
             await client.async_list_models()
     finally:
         await session.close()
@@ -512,7 +515,7 @@ async def test_chat_completion_401(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(AuthError):
+        with pytest.raises(GitHubCopilotAuthError):
             await client.async_chat_completion(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -529,7 +532,7 @@ async def test_chat_completion_429(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(RateLimitError):
+        with pytest.raises(GitHubCopilotRateLimitError):
             await client.async_chat_completion(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -548,7 +551,7 @@ async def test_chat_completion_500(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(ApiError, match="500"):
+        with pytest.raises(GitHubCopilotApiError, match="500"):
             await client.async_chat_completion(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -565,7 +568,7 @@ async def test_chat_completion_timeout(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(ConnectionError):
+        with pytest.raises(GitHubCopilotConnectionError):
             await client.async_chat_completion(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -609,7 +612,7 @@ async def test_chat_completion_stream_401(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(AuthError):
+        with pytest.raises(GitHubCopilotAuthError):
             async for _ in client.async_chat_completion_stream(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -627,7 +630,7 @@ async def test_chat_completion_stream_429(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(RateLimitError):
+        with pytest.raises(GitHubCopilotRateLimitError):
             async for _ in client.async_chat_completion_stream(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -673,7 +676,7 @@ async def test_chat_completion_stream_connection_error(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(ConnectionError, match="Streaming"):
+        with pytest.raises(GitHubCopilotConnectionError, match="Streaming"):
             async for _ in client.async_chat_completion_stream(
                 messages=[{"role": "user", "content": "Hello"}],
                 model="gpt-4.1",
@@ -692,48 +695,74 @@ async def test_refresh_token_connection_error(aiohttp_mock):
     aiohttp_mock.post(GITHUB_TOKEN_URL, exception=aiohttp.ClientError("Network down"))
 
     session = aiohttp.ClientSession()
-    client = GitHubCopilotClient(
+    auth = GitHubCopilotAuth(
         session=session,
-        config={
-            CONF_ACCESS_TOKEN: "gho_old",
-            CONF_REFRESH_TOKEN: "ghr_test",
-        },
+        access_token="gho_old",
+        refresh_token="ghr_test",
+        expiry=None,
     )
+    callback = AsyncMock()
     try:
         with pytest.raises(
-            ConnectionError,
+            GitHubCopilotConnectionError,
             match="Connection error during token refresh",
         ):
-            await client.auth.async_refresh_token()
+            await auth.async_refresh_token(callback)
     finally:
         await session.close()
-
-
-# ── Validate Token Generic Exception ──
-
-
-async def test_validate_token_wraps_unexpected_error():
-    """Test validate_token converts unexpected errors to ConnectionError."""
-
-    dummy_session = MagicMock(spec=aiohttp.ClientSession)
-    client = GitHubCopilotClient(
-        session=dummy_session, config={CONF_ACCESS_TOKEN: "gho_test"}
-    )
-
-    # Patch _async_ensure_copilot_token to raise an unexpected error
-    async def bad_ensure():
-        raise ValueError("Unexpected parsing error")
-
-    client.auth.async_ensure_copilot_token = bad_ensure
-    with pytest.raises(ConnectionError, match="Token validation failed"):
-        await client.auth.async_validate_token()
 
 
 # ── Poll Timeout Test ──
 
 
-async def test_poll_token_client_timeout(aiohttp_mock):
-    """Test that polling times out after expires_in seconds."""
+async def test_device_activation_connection_error_during_poll(aiohttp_mock):
+    """Test connection error mid-poll is wrapped in GitHubCopilotConnectionError."""
+
+    # First poll returns pending, second raises a network error
+    aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_PENDING_RESPONSE)
+    aiohttp_mock.post(
+        GITHUB_TOKEN_URL, exception=aiohttp.ClientError("Connection lost")
+    )
+
+    session = aiohttp.ClientSession()
+    try:
+        flow = _make_device_flow(session)
+        with pytest.raises(
+            GitHubCopilotConnectionError, match="Connection error during token polling"
+        ):
+            await flow.async_device_activation()
+    finally:
+        await session.close()
+
+
+async def test_refresh_token_callback_args(aiohttp_mock):
+    """Test that refresh_token passes exact token values to the callback."""
+
+    aiohttp_mock.post(GITHUB_TOKEN_URL, payload=MOCK_TOKEN_RESPONSE)
+
+    session = aiohttp.ClientSession()
+    auth = GitHubCopilotAuth(
+        session=session,
+        access_token="gho_old_token",
+        refresh_token="ghr_test_refresh",
+        expiry=None,
+    )
+    callback = AsyncMock()
+    try:
+        await auth.async_refresh_token(callback)
+
+        # Verify callback was called with the exact new token values
+        callback.assert_called_once()
+        call_args = callback.call_args[0]
+        assert call_args[0] == MOCK_TOKEN_RESPONSE["access_token"]
+        assert call_args[1] == MOCK_TOKEN_RESPONSE["refresh_token"]
+        assert call_args[2] is not None  # expiry (datetime object)
+    finally:
+        await session.close()
+
+
+async def test_device_activation_timeout(aiohttp_mock):
+    """Test that activation times out after expires_in seconds."""
 
     # Always return pending — the client-side deadline should trigger
     aiohttp_mock.post(
@@ -742,13 +771,16 @@ async def test_poll_token_client_timeout(aiohttp_mock):
 
     session = aiohttp.ClientSession()
     try:
-        with pytest.raises(AuthError, match="timed out"):
-            await GitHubCopilotAuth.async_poll_for_token(
-                device_code="dc_test_123456",
-                interval=0,
-                expires_in=0,  # Immediate timeout
-                session=session,
-            )
+        flow = GitHubCopilotDeviceFlow(
+            session,
+            device_code="dc_test_123456",
+            user_code="ABCD-1234",
+            verification_uri="https://github.com/login/device",
+            interval=0,
+            expires_in=0,  # Immediate timeout
+        )
+        with pytest.raises(GitHubCopilotAuthError, match="timed out"):
+            await flow.async_device_activation()
     finally:
         await session.close()
 
@@ -803,7 +835,7 @@ async def test_validate_model_auth_error(aiohttp_mock):
     session = aiohttp.ClientSession()
     client = _make_client(session)
     try:
-        with pytest.raises(AuthError):
+        with pytest.raises(GitHubCopilotAuthError):
             await client.async_validate_model("gpt-4.1")
     finally:
         await session.close()
