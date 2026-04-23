@@ -7,7 +7,7 @@ from unittest.mock import patch
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from custom_components.github_copilot.api import GitHubCopilotClient
+from custom_components.github_copilot.api import AuthError, ConnectionError
 
 
 async def test_async_setup_entry(
@@ -28,7 +28,7 @@ async def test_async_setup_entry(
 async def test_async_unload_entry(
     hass: HomeAssistant, mock_config_entry, mock_client, setup_ha
 ):
-    """Test unloading a config entry closes the client session."""
+    """Test unloading a config entry unloads platforms."""
 
     mock_config_entry.runtime_data = mock_client
 
@@ -41,7 +41,6 @@ async def test_async_unload_entry(
 
     assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
     assert mock_config_entry.state == ConfigEntryState.NOT_LOADED
-    mock_client.async_close.assert_called_once()
 
 
 async def test_setup_entry_auth_failed(
@@ -49,9 +48,7 @@ async def test_setup_entry_auth_failed(
 ):
     """Test setup with invalid token raises auth failed."""
 
-    mock_client.async_validate_token.side_effect = GitHubCopilotClient.AuthError(
-        "Token invalid"
-    )
+    mock_client.auth.async_validate_token.side_effect = AuthError("Token invalid")
 
     with patch(
         "custom_components.github_copilot.GitHubCopilotClient",
@@ -68,7 +65,7 @@ async def test_setup_entry_not_ready(
 ):
     """Test setup when API is unreachable."""
 
-    mock_client.async_validate_token.side_effect = GitHubCopilotClient.ConnectionError(
+    mock_client.auth.async_validate_token.side_effect = ConnectionError(
         "Cannot connect"
     )
 

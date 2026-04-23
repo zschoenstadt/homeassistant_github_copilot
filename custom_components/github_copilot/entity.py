@@ -17,7 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import llm
 from homeassistant.helpers.entity import Entity
 
-from .api import GitHubCopilotClient
+from .api import GitHubCopilotApiError, GitHubCopilotAuthError
 from .const import (
     CONF_MAX_HISTORY,
     CONF_MODEL,
@@ -57,15 +57,8 @@ class GitHubCopilotBaseEntity(Entity):
         self.entry = entry
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "GitHub Copilot",
-            "manufacturer": "GitHub",
+            "name": "GitHub Copilot Client",
         }
-
-    @property
-    def client(self) -> GitHubCopilotClient:
-        """Return the API client."""
-
-        return self.entry.runtime_data
 
     @property
     def model(self) -> str:
@@ -194,22 +187,15 @@ class GitHubCopilotBaseEntity(Entity):
 
             # Call the Copilot API, retrying once on auth failure
             try:
-                response = await self.client.async_chat_completion(
+                response = await self.entry.runtime_data.async_chat_completion(
                     messages=messages,
                     model=self.model,
                     max_tokens=max_tokens,
                     tools=tools,
                 )
-            except GitHubCopilotClient.AuthError:
-                _LOGGER.warning("Auth error during chat, attempting token refresh")
-                await self.client.async_refresh_token()
-                response = await self.client.async_chat_completion(
-                    messages=messages,
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    tools=tools,
-                )
-            except GitHubCopilotClient.ApiError as err:
+            except GitHubCopilotAuthError:
+                raise
+            except GitHubCopilotApiError as err:
                 if "403" in str(err):
                     raise ValueError(
                         f"Model '{self.model}' is not accessible with "

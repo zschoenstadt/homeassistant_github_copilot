@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
 import logging
 from typing import Any
 
@@ -12,9 +12,9 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.core import callback
 from homeassistant.helpers import llm
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -26,9 +26,18 @@ from homeassistant.helpers.selector import (
 )
 import voluptuous as vol
 
-from .api import GitHubCopilotClient
+from .api import (
+    GitHubCopilotApiError,
+    GitHubCopilotAuth,
+    GitHubCopilotAuthError,
+    GitHubCopilotClient,
+    GitHubCopilotConnectionError,
+    GitHubCopilotDeviceFlow,
+    GitHubCopilotModel,
+)
 from .const import (
     CONF_ACCESS_TOKEN,
+    CONF_LLM_HASS_API,
     CONF_MAX_HISTORY,
     CONF_MODEL,
     CONF_PROMPT,
@@ -48,241 +57,143 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         """Initialize the config flow."""
 
-        self._device_code: str | None = None
-        self._user_code: str | None = None
-        self._verification_uri: str | None = None
-        self._interval: int = 5
-        self._expires_in: int = 900
-        self._token_data: dict[str, Any] = {}
-        self._models: list[dict[str, str]] = []
+        super().__init__(*args, **kwargs)
+        self._device_flow: GitHubCopilotDeviceFlow | None = None
+        self._ghc: GitHubCopilotClient | None = None
+        self._models: list[GitHubCopilotModel] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step — user triggers setup."""
 
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Initiate the OAuth device flow with GitHub
+        # Initiate the OAuth device flow with GitHub
+        if self._device_flow is None:
             try:
-                device_flow = await GitHubCopilotClient.async_initiate_device_flow()
-                self._device_code = device_flow.device_code
-                self._user_code = device_flow.user_code
-                self._verification_uri = device_flow.verification_uri
-                self._interval = device_flow.interval
-                self._expires_in = device_flow.expires_in
-                return await self.async_step_auth()
-            except GitHubCopilotClient.ConnectionError:
-                errors["base"] = "cannot_connect"
+                session = async_get_clientsession(self.hass)
+                self._device_flow = await GitHubCopilotDeviceFlow.async_initiate(
+                    session
+                )
+            except GitHubCopilotConnectionError:
+                _LOGGER.exception("Connection error during device flow initiation.")
+                return self.async_abort(reason="cannot_connect")
             except Exception:
                 _LOGGER.exception("Unexpected error during device flow initiation")
-                errors["base"] = "unknown"
+                return self.async_abort(reason="unknown")
+
+        # User clicked "Submit", Start polling for the results
+        if user_input is not None:
+            _LOGGER.debug("Creating task to poll for device activation")
+            try:
+                auth = await self._device_flow.async_device_activation()
+            except GitHubCopilotConnectionError:
+                return await self.async_step_login_timeout()
+            except GitHubCopilotAuthError:
+                return self.async_abort(reason="auth_failure")
+            except Exception as ex:
+                _LOGGER.error("Unexpected error during device activation.", exc_info=ex)
+                return self.async_abort(reason="unknown_cannot_login")
+
+            self._ghc = GitHubCopilotClient(
+                session=auth.session, auth=auth
+            )
+
+            return await self.async_step_model()
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({}),
-            errors=errors,
+            description_placeholders={
+                "verification_uri": self._device_flow.verification_uri,
+                "user_code": self._device_flow.user_code,
+            },
         )
 
-    async def async_step_auth(
+    async def async_step_login_timeout(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the device code and poll for authorization."""
+        """Handle timeout failures. show error and allow retry."""
 
-        errors: dict[str, str] = {}
+        if user_input is None:
+            return self.async_show_form(step_id="login_timeout")
 
-        if user_input is not None:
-            # User clicked "submit" — start polling for the token
-            try:
-                token_resp = await GitHubCopilotClient.async_poll_for_token(
-                    device_code=self._device_code,
-                    interval=self._interval,
-                    expires_in=self._expires_in,
-                )
-
-                # Store the token data for the next step
-                self._token_data = {
-                    CONF_ACCESS_TOKEN: token_resp.access_token,
-                    CONF_REFRESH_TOKEN: token_resp.refresh_token,
-                }
-                if token_resp.expires_in:
-                    self._token_data[CONF_TOKEN_EXPIRY] = (
-                        datetime.now() + timedelta(seconds=token_resp.expires_in)
-                    ).isoformat()
-
-                return await self.async_step_model()
-
-            except GitHubCopilotClient.AuthError as err:
-                if "timed out" in str(err).lower():
-                    errors["base"] = "auth_timeout"
-                elif "denied" in str(err).lower():
-                    errors["base"] = "auth_denied"
-                else:
-                    errors["base"] = "unknown"
-            except GitHubCopilotClient.ConnectionError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected error during token polling")
-                errors["base"] = "unknown"
-
-        return self.async_show_form(
-            step_id="auth",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "verification_uri": self._verification_uri or "",
-                "user_code": self._user_code or "",
-            },
-            errors=errors,
-        )
+        return await self.async_step_user()
 
     async def async_step_model(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Let the user pick a default model."""
 
+        assert self._ghc is not None
         errors: dict[str, str] = {}
 
+        # TODO: Make model validation optional, since it costs 1 token
         if user_input is not None:
-            # Validate user has access to the selected model
             try:
-                client = GitHubCopilotClient(
-                    access_token=self._token_data[CONF_ACCESS_TOKEN],
-                )
-                has_access = await client.async_validate_model(user_input[CONF_MODEL])
-                await client.async_close()
-
-                if has_access:
-                    self._token_data[CONF_MODEL] = user_input[CONF_MODEL]
+                if await self._ghc.async_validate_model(user_input[CONF_MODEL]):
                     return self.async_create_entry(
-                        title="GitHub Copilot",
-                        data=self._token_data,
+                        title="GitHub Copilot Client",
+                        data={
+                            CONF_ACCESS_TOKEN: self._ghc.auth.access_token,
+                            CONF_REFRESH_TOKEN: self._ghc.auth.refresh_token,
+                            CONF_TOKEN_EXPIRY: self._ghc.auth.expiry,
+                        },
+                        options={
+                            CONF_MODEL: user_input[CONF_MODEL],
+                        },
                     )
-
-                errors["base"] = "model_no_access"
-            except GitHubCopilotClient.AuthError:
-                errors["base"] = "unknown"
-            except GitHubCopilotClient.ConnectionError:
-                errors["base"] = "cannot_connect"
+                errors[CONF_MODEL] = "model_no_access"
+            except GitHubCopilotConnectionError:
+                return await self.async_step_model_timeout()
+            except GitHubCopilotAuthError:
+                _LOGGER.exception("Unexpected error during model validation")
+                return self.async_abort(reason="auth_failure")
             except Exception:
-                _LOGGER.exception("Unexpected error validating model")
-                errors["base"] = "unknown"
+                _LOGGER.exception("Unexpected error during model validation")
+                return self.async_abort(reason="unknown")
 
         # Fetch available models for the dropdown
         if not self._models:
             try:
-                client = GitHubCopilotClient(
-                    access_token=self._token_data[CONF_ACCESS_TOKEN],
-                )
-                models = await client.async_list_models()
-                self._models = [{"id": m.id, "name": m.name} for m in models]
-                await client.async_close()
+                self._models = await self._ghc.async_list_models()
+            except GitHubCopilotAuthError:
+                return self.async_abort(reason="auth_failure")
             except Exception:
-                _LOGGER.exception("Failed to fetch models, using default")
-                self._models = [{"id": DEFAULT_MODEL, "name": DEFAULT_MODEL}]
+                _LOGGER.exception("Failed to fetch models.")
+                return self.async_abort(reason="unknown_cannot_fetch_models")
 
         # Build the model selection form
-        model_options = {m["id"]: m["name"] for m in self._models}
-        if not model_options:
-            model_options = {DEFAULT_MODEL: DEFAULT_MODEL}
+        default_model = self._models[0].id if self._models else DEFAULT_MODEL
+        model_choices = (
+            {m.id: m.name for m in self._models}
+            if self._models
+            else {DEFAULT_MODEL: DEFAULT_MODEL + " (default)"}
+        )
 
         return self.async_show_form(
             step_id="model",
+            errors=errors,
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_MODEL, default=DEFAULT_MODEL): vol.In(
-                        model_options
+                    vol.Required(CONF_MODEL, default=default_model): vol.In(
+                        model_choices
                     ),
                 }
             ),
-            errors=errors,
         )
 
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
-        """Handle reauth when token refresh fails."""
-
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(
+    async def async_step_model_timeout(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm reauth and re-run device flow."""
+        """Handle model validation failures. show error and allow retry."""
 
-        if user_input is not None:
-            # Initiate a new device flow for re-authorization
-            try:
-                device_flow = await GitHubCopilotClient.async_initiate_device_flow()
-                self._device_code = device_flow.device_code
-                self._user_code = device_flow.user_code
-                self._verification_uri = device_flow.verification_uri
-                self._interval = device_flow.interval
-                self._expires_in = device_flow.expires_in
-                return await self.async_step_reauth_auth()
-            except GitHubCopilotClient.ConnectionError:
-                return self.async_show_form(
-                    step_id="reauth_confirm",
-                    errors={"base": "cannot_connect"},
-                )
+        if user_input is None:
+            return self.async_show_form(step_id="model_timeout")
 
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=vol.Schema({}),
-        )
-
-    async def async_step_reauth_auth(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle reauth device flow polling."""
-
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Poll for the new token
-            try:
-                token_resp = await GitHubCopilotClient.async_poll_for_token(
-                    device_code=self._device_code,
-                    interval=self._interval,
-                    expires_in=self._expires_in,
-                )
-
-                # Merge the new credentials into the existing entry
-                reauth_entry = self._get_reauth_entry()
-                new_data = {
-                    **reauth_entry.data,
-                    CONF_ACCESS_TOKEN: token_resp.access_token,
-                    CONF_REFRESH_TOKEN: token_resp.refresh_token,
-                }
-                if token_resp.expires_in:
-                    new_data[CONF_TOKEN_EXPIRY] = (
-                        datetime.now() + timedelta(seconds=token_resp.expires_in)
-                    ).isoformat()
-
-                return self.async_update_reload_and_abort(
-                    reauth_entry,
-                    data=new_data,
-                    reason="reauth_successful",
-                )
-
-            except GitHubCopilotClient.AuthError as err:
-                if "denied" in str(err).lower():
-                    errors["base"] = "auth_denied"
-                else:
-                    errors["base"] = "auth_timeout"
-            except GitHubCopilotClient.ConnectionError:
-                errors["base"] = "cannot_connect"
-
-        return self.async_show_form(
-            step_id="reauth_auth",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "verification_uri": self._verification_uri or "",
-                "user_code": self._user_code or "",
-            },
-            errors=errors,
-        )
+        return await self.async_step_model()
 
     @staticmethod
     @callback
@@ -291,44 +202,17 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> GitHubCopilotOptionsFlow:
         """Get the options flow."""
 
-        return GitHubCopilotOptionsFlow(config_entry)
+        return GitHubCopilotOptionsFlow()
 
 
 class GitHubCopilotOptionsFlow(OptionsFlow):
     """Handle options for GitHub Copilot."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
+    def __init__(self) -> None:
         """Initialize the options flow."""
 
-        self._config_entry = config_entry
-        self._models: list[dict[str, str]] = []
-
-    async def _async_fetch_models(self) -> dict[str, str]:
-        """Fetch model list and return as {id: name} dict, always including current."""
-
-        current_model = self._config_entry.options.get(
-            CONF_MODEL,
-            self._config_entry.data.get(CONF_MODEL, DEFAULT_MODEL),
-        )
-        model_options: dict[str, str] = {}
-
-        # Try fetching the full model catalog
-        try:
-            client: GitHubCopilotClient = self._config_entry.runtime_data
-            models = await client.async_list_models()
-            model_options = {m.id: m.name for m in models}
-        except (
-            GitHubCopilotClient.ApiError,
-            GitHubCopilotClient.ConnectionError,
-            GitHubCopilotClient.AuthError,
-        ) as err:
-            _LOGGER.warning("Failed to fetch models for options flow: %s", err)
-
-        # Always include the currently configured model
-        if current_model not in model_options:
-            model_options[current_model] = current_model
-
-        return model_options
+        super().__init__()
+        self._models: list[GitHubCopilotModel] = []
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -336,66 +220,58 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         """Handle options."""
 
         errors: dict[str, str] = {}
+        current_model = self.config_entry.options.get(CONF_MODEL)
+        ghc: GitHubCopilotClient = self.config_entry.runtime_data.ghc
 
         if user_input is not None:
             # Validate model access if the user changed the model
-            current_model = self._config_entry.options.get(
-                CONF_MODEL,
-                self._config_entry.data.get(CONF_MODEL, DEFAULT_MODEL),
-            )
             new_model = user_input.get(CONF_MODEL, current_model)
 
+            # TODO: Make model validation optional since it costs 1 token
             if new_model != current_model:
                 try:
-                    client: GitHubCopilotClient = self._config_entry.runtime_data
-                    has_access = await client.async_validate_model(new_model)
-                    if not has_access:
-                        errors["base"] = "model_no_access"
+                    if not await ghc.async_validate_model(new_model):
+                        errors[CONF_MODEL] = "model_no_access"
                 except (
-                    GitHubCopilotClient.ApiError,
-                    GitHubCopilotClient.ConnectionError,
-                    GitHubCopilotClient.AuthError,
-                ) as err:
-                    _LOGGER.warning(
-                        "Model validation failed for %s: %s",
-                        new_model,
-                        err,
-                    )
+                    GitHubCopilotApiError,
+                    GitHubCopilotConnectionError,
+                    GitHubCopilotAuthError,
+                ):
+                    _LOGGER.exception("Model validation failed for %s", new_model)
+                    errors[CONF_MODEL] = "model_no_access"
 
             if not errors:
                 return self.async_create_entry(title="", data=user_input)
 
-        # Gather current settings and available choices
-        model_options = await self._async_fetch_models()
-        current_model = self._config_entry.options.get(
-            CONF_MODEL,
-            self._config_entry.data.get(CONF_MODEL, DEFAULT_MODEL),
-        )
+        # Fetch available models for the dropdown
+        if not self._models:
+            try:
+                self._models = await ghc.async_list_models()
+            except Exception:
+                _LOGGER.exception("Failed to fetch models.")
+                errors[CONF_MODEL] = "cannot_fetch_models"
 
         # Get available LLM APIs for "Control Home Assistant"
         hass_llm_apis = [
             SelectOptionDict(label=api.name, value=api.id)
             for api in llm.async_get_apis(self.hass)
         ]
-        selected_llm_apis = self._config_entry.options.get(CONF_LLM_HASS_API, [])
+        selected_llm_apis = self.config_entry.options.get(CONF_LLM_HASS_API, [])
 
         # Build and show the options form
         return self.async_show_form(
             step_id="init",
+            errors=errors,
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        CONF_MODEL,
-                        default=current_model,
-                    ): vol.In(model_options),
+                    vol.Optional(CONF_MODEL, default=current_model): vol.In(
+                        {m.id: m.name for m in self._models}
+                    ),
                     vol.Optional(
                         CONF_PROMPT,
                         description={
-                            "suggested_value": self._config_entry.options.get(
-                                CONF_PROMPT,
-                                self._config_entry.data.get(
-                                    CONF_PROMPT, DEFAULT_SYSTEM_PROMPT
-                                ),
+                            "suggested_value": self.config_entry.options.get(
+                                CONF_PROMPT, DEFAULT_SYSTEM_PROMPT
                             ),
                         },
                     ): TemplateSelector(),
@@ -403,16 +279,14 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                         CONF_LLM_HASS_API,
                         description={"suggested_value": selected_llm_apis},
                     ): SelectSelector(
-                        SelectSelectorConfig(
-                            options=hass_llm_apis,
-                            multiple=True,
-                        )
+                        SelectSelectorConfig(options=hass_llm_apis, multiple=True)
                     ),
                     vol.Optional(
                         CONF_MAX_HISTORY,
                         description={
-                            "suggested_value": self._config_entry.options.get(
-                                CONF_MAX_HISTORY, DEFAULT_MAX_HISTORY
+                            "suggested_value": self.config_entry.options.get(
+                                CONF_MAX_HISTORY,
+                                DEFAULT_MAX_HISTORY,
                             ),
                         },
                     ): NumberSelector(
@@ -425,5 +299,4 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
-            errors=errors,
         )

@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.intent import IntentResponseType
 import pytest
 
-from custom_components.github_copilot.api import GitHubCopilotClient
+from custom_components.github_copilot.api import ApiError, AuthError
 from custom_components.github_copilot.conversation import (
     GitHubCopilotConversationEntity,
 )
@@ -88,9 +88,7 @@ async def test_handle_message_api_error(
 ):
     """Test message handling when API returns error."""
 
-    mock_client.async_chat_completion.side_effect = GitHubCopilotClient.ApiError(
-        "Server error"
-    )
+    mock_client.async_chat_completion.side_effect = ApiError("Server error")
 
     result = await _converse(hass, "Hello", setup_conversation)
 
@@ -105,16 +103,16 @@ async def test_handle_message_auth_expired(
 
     # First call fails with auth error, second succeeds
     mock_client.async_chat_completion.side_effect = [
-        GitHubCopilotClient.AuthError("Token expired"),
+        AuthError("Token expired"),
         MOCK_CHAT_COMPLETION_RESPONSE,
     ]
-    mock_client.async_refresh_token.return_value = None
+    mock_client.auth.async_refresh_token.return_value = None
 
     result = await _converse(hass, "Hello after refresh", setup_conversation)
 
     assert result.response.speech is not None
     assert "Hello" in result.response.speech["plain"]["speech"]
-    mock_client.async_refresh_token.assert_called_once()
+    mock_client.auth.async_refresh_token.assert_called_once()
     assert mock_client.async_chat_completion.call_count == 2
 
 
@@ -142,10 +140,8 @@ async def test_handle_message_refresh_failure(
     """Test message handling when token refresh also fails."""
 
     # Chat fails with auth error, refresh also fails
-    mock_client.async_chat_completion.side_effect = GitHubCopilotClient.AuthError(
-        "Token expired"
-    )
-    mock_client.async_refresh_token.side_effect = GitHubCopilotClient.AuthError(
+    mock_client.async_chat_completion.side_effect = AuthError("Token expired")
+    mock_client.auth.async_refresh_token.side_effect = AuthError(
         "Refresh token revoked"
     )
 
@@ -153,7 +149,7 @@ async def test_handle_message_refresh_failure(
 
     # Should return an error response
     assert result.response.response_type == IntentResponseType.ERROR
-    mock_client.async_refresh_token.assert_called_once()
+    mock_client.auth.async_refresh_token.assert_called_once()
 
 
 async def test_handle_message_no_choices(
@@ -173,7 +169,7 @@ async def test_handle_message_model_no_access(
 ):
     """Test that a 403 model access error gives a clear message."""
 
-    mock_client.async_chat_completion.side_effect = GitHubCopilotClient.ApiError(
+    mock_client.async_chat_completion.side_effect = ApiError(
         "Chat completion error 403: No access to model"
     )
 

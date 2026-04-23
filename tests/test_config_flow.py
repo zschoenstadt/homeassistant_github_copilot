@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 import pytest
 
 from custom_components.github_copilot.api import (
+    AuthError,
+    ConnectionError,
     DeviceFlowResponse,
-    GitHubCopilotClient,
     Model,
     TokenResponse,
 )
@@ -24,12 +26,23 @@ from custom_components.github_copilot.const import (
 )
 
 
+@pytest.fixture(autouse=True)
+def mock_get_clientsession():
+    """Patch async_get_clientsession so the config flow gets a mock session."""
+
+    with patch(
+        "custom_components.github_copilot.config_flow.async_get_clientsession",
+        return_value=AsyncMock(spec=aiohttp.ClientSession),
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_device_flow():
     """Mock the device flow initiation."""
 
     with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_initiate_device_flow",
+        "custom_components.github_copilot.config_flow.GitHubCopilotAuth.async_initiate_device_flow",
         new_callable=AsyncMock,
     ) as mock:
         mock.return_value = DeviceFlowResponse(
@@ -47,7 +60,7 @@ def mock_poll_token():
     """Mock the token polling."""
 
     with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_poll_for_token",
+        "custom_components.github_copilot.config_flow.GitHubCopilotAuth.async_poll_for_token",
         new_callable=AsyncMock,
     ) as mock:
         mock.return_value = TokenResponse(
@@ -76,17 +89,6 @@ def mock_list_models():
 
 
 @pytest.fixture
-def mock_close():
-    """Mock the client close."""
-
-    with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_close",
-        new_callable=AsyncMock,
-    ) as mock:
-        yield mock
-
-
-@pytest.fixture
 def mock_validate_model():
     """Mock the model validation."""
 
@@ -107,7 +109,6 @@ async def test_full_flow_success(
     mock_device_flow,
     mock_poll_token,
     mock_list_models,
-    mock_close,
     mock_validate_model,
 ):
     """Test the complete config flow: user → auth → model → entry."""
@@ -119,22 +120,20 @@ async def test_full_flow_success(
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "user"
 
-    # Step 2: Initiate device flow
+    # Step 2: Submit user step → starts device flow → shows progress
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
-    assert result["type"] == FlowResultType.FORM
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
     assert result["step_id"] == "auth"
-    assert "ABCD-1234" in result["description_placeholders"]["user_code"]
+    assert result["description_placeholders"]["user_code"] == "ABCD-1234"
 
-    # Step 3: Poll for token (user authorized)
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={}
-    )
+    # Step 3: Task completes instantly → HA auto-transitions to model form
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "model"
 
-    # Step 4: Select model
+    # Step 4: Select model → create entry
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={CONF_MODEL: "gpt-4.1"}
     )
@@ -158,7 +157,7 @@ async def test_flow_user_step_shows_form(hass: HomeAssistant, setup_ha):
 async def test_flow_auth_step_shows_code(
     hass: HomeAssistant, setup_ha, mock_device_flow
 ):
-    """Test that the auth step shows the device code."""
+    """Test that the auth step shows the device code in progress UI."""
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -166,6 +165,7 @@ async def test_flow_auth_step_shows_code(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
     assert result["step_id"] == "auth"
     assert result["description_placeholders"]["user_code"] == "ABCD-1234"
     assert (
@@ -177,54 +177,56 @@ async def test_flow_auth_step_shows_code(
 async def test_flow_poll_timeout(
     hass: HomeAssistant, setup_ha, mock_device_flow, mock_poll_token
 ):
-    """Test polling timeout shows error."""
+    """Test polling timeout aborts with auth_timeout reason."""
 
-    mock_poll_token.side_effect = GitHubCopilotClient.AuthError(
-        "Authorization timed out."
-    )
+    mock_poll_token.side_effect = AuthError("Authorization timed out.")
 
+    # Init → user form → submit → show progress
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={}
-    )
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"]["base"] == "auth_timeout"
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
+    assert result["step_id"] == "auth"
+
+    # Re-entry — task failed with AuthError → auto-transitions to auth_failed → abort
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "auth_timeout"
 
 
 async def test_flow_poll_denied(
     hass: HomeAssistant, setup_ha, mock_device_flow, mock_poll_token
 ):
-    """Test user denies auth shows error."""
+    """Test user denies auth aborts with auth_denied reason."""
 
-    mock_poll_token.side_effect = GitHubCopilotClient.AuthError(
-        "Authorization was denied by the user."
-    )
+    mock_poll_token.side_effect = AuthError("Authorization was denied by the user.")
 
+    # Init → user form → submit → show progress
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={}
-    )
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"]["base"] == "auth_denied"
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
+    assert result["step_id"] == "auth"
+
+    # Re-entry — task failed with denied → auto-transitions to auth_failed → abort
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "auth_denied"
 
 
 async def test_flow_network_error(hass: HomeAssistant, setup_ha):
     """Test network failure during device flow."""
 
     with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_initiate_device_flow",
+        "custom_components.github_copilot.config_flow.GitHubCopilotAuth.async_initiate_device_flow",
         new_callable=AsyncMock,
-        side_effect=GitHubCopilotClient.ConnectionError("Network error"),
+        side_effect=ConnectionError("Network error"),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -291,22 +293,23 @@ async def test_flow_model_no_access(
     mock_device_flow,
     mock_poll_token,
     mock_list_models,
-    mock_close,
     mock_validate_model,
 ):
     """Test selecting a model the user can't access shows error."""
 
     mock_validate_model.return_value = False
 
+    # Navigate through auth progress steps
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={}
-    )
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "model"
 
     # Select a model we don't have access to
@@ -336,7 +339,6 @@ async def test_reauth_flow_success(
     mock_client,
     mock_device_flow,
     mock_poll_token,
-    mock_close,
 ):
     """Test successful reauth flow."""
 
@@ -352,18 +354,16 @@ async def test_reauth_flow_success(
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "reauth_confirm"
 
-    # Confirm reauth → triggers device flow
+    # Confirm reauth → triggers device flow → show progress
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
-    assert result["type"] == FlowResultType.FORM
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
     assert result["step_id"] == "reauth_auth"
-    assert "ABCD-1234" in result["description_placeholders"]["user_code"]
+    assert result["description_placeholders"]["user_code"] == "ABCD-1234"
 
-    # Poll for token → success
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={}
-    )
+    # Task completes instantly → auto-transitions to reauth_complete → abort
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
 
@@ -373,7 +373,6 @@ async def test_reauth_flow_connection_error(
     setup_ha,
     mock_config_entry,
     mock_client,
-    mock_close,
 ):
     """Test reauth with connection error during device flow."""
 
@@ -388,9 +387,9 @@ async def test_reauth_flow_connection_error(
     result = await mock_config_entry.start_reauth_flow(hass)
 
     with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_initiate_device_flow",
+        "custom_components.github_copilot.config_flow.GitHubCopilotAuth.async_initiate_device_flow",
         new_callable=AsyncMock,
-        side_effect=GitHubCopilotClient.ConnectionError("Network error"),
+        side_effect=ConnectionError("Network error"),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={}
@@ -405,9 +404,11 @@ async def test_reauth_flow_denied(
     mock_config_entry,
     mock_client,
     mock_device_flow,
-    mock_close,
+    mock_poll_token,
 ):
     """Test reauth when user denies authorization."""
+
+    mock_poll_token.side_effect = AuthError("Authorization was denied by the user.")
 
     mock_config_entry.runtime_data = mock_client
     with patch(
@@ -419,25 +420,17 @@ async def test_reauth_flow_denied(
 
     result = await mock_config_entry.start_reauth_flow(hass)
 
-    # Confirm reauth
+    # Confirm reauth → show progress
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input={}
     )
+    assert result["type"] == FlowResultType.SHOW_PROGRESS
     assert result["step_id"] == "reauth_auth"
 
-    # Poll returns denied
-    with patch(
-        "custom_components.github_copilot.config_flow.GitHubCopilotClient.async_poll_for_token",
-        new_callable=AsyncMock,
-        side_effect=GitHubCopilotClient.AuthError(
-            "Authorization was denied by the user."
-        ),
-    ):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={}
-        )
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"]["base"] == "auth_denied"
+    # Task failed with denied → auto-transitions to auth_failed → abort
+    result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "auth_denied"
 
 
 # ── Model Fetch Fallback Test ──
@@ -448,7 +441,6 @@ async def test_flow_model_fetch_failure(
     setup_ha,
     mock_device_flow,
     mock_poll_token,
-    mock_close,
     mock_validate_model,
 ):
     """Test model fetch failure falls back to default model."""
@@ -458,16 +450,16 @@ async def test_flow_model_fetch_failure(
         new_callable=AsyncMock,
         side_effect=Exception("API unreachable"),
     ):
+        # Navigate through auth progress steps
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={}
         )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={}
-        )
-        # Should reach model step with fallback
+        assert result["type"] == FlowResultType.SHOW_PROGRESS
+
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "model"
 

@@ -1,34 +1,37 @@
 {
+  "title": "GitHub Copilot Client",
+  "common":{
+  },
   "config": {
     "step": {
       "user": {
-        "title": "Set up GitHub Copilot",
-        "description": "Connect your GitHub Copilot subscription to Home Assistant.",
+        "title": "Setup GitHub Copilot Client",
+        "description": "Visit **{verification_uri}** and enter the code: **{user_code}**\n",
         "data": {}
       },
-      "auth": {
-        "title": "Authorize with GitHub",
-        "description": "Visit **{verification_uri}** and enter the code:\n\n## {user_code}\n\nWaiting for authorization...",
-        "data": {}
+      "login_timeout": {
+        "description": "The authentication process timed out. Please try again."
       },
       "model": {
         "title": "Select a model",
-        "description": "Choose the default model for GitHub Copilot.",
+        "description": "Choose the model for GitHub Copilot.",
         "data": {
           "model": "Model"
         }
-      }
+      },
+      "model_timeout": {
+        "description": "The authentication process timed out. Please try again."
+      } 
     },
     "error": {
-      "auth_timeout": "Authorization timed out. Please try again.",
-      "auth_denied": "Authorization was denied.",
-      "cannot_connect": "Could not connect to GitHub. Check your network.",
       "model_no_access": "Your GitHub Copilot subscription does not have access to this model. Please choose a different one.",
-      "unknown": "An unexpected error occurred."
+      "cannot_fetch_models": "Your GitHub Copilot subscription does not have access to this model. Please choose a different one."
     },
     "abort": {
-      "already_configured": "This GitHub account is already configured.",
-      "reauth_successful": "Re-authentication was successful."
+      "cannot_connect": "Connection to GitHub failed. Please check your network",
+      "auth_failure": "Authorization failed.",
+      "unknown_cannot_fetch_models": "An unexpected error has occurred while fetching models.",
+      "unknown_cannot_login": "An unexpected error has occurred."
     }
   },
   "options": {

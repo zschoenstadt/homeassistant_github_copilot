@@ -6,12 +6,12 @@ from typing import Literal
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import CONF_PROMPT, DEFAULT_CONVERSATION_NAME, DOMAIN
+from .const import CONF_LLM_HASS_API, CONF_PROMPT, DEFAULT_CONVERSATION_NAME, DOMAIN
 from .entity import GitHubCopilotBaseEntity
 
 

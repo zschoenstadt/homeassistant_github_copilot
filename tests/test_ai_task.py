@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 import pytest
 
-from custom_components.github_copilot.api import GitHubCopilotClient
+from custom_components.github_copilot.api import ApiError
 
 from .conftest import MOCK_CHAT_COMPLETION_JSON_RESPONSE, MOCK_CHAT_COMPLETION_RESPONSE
 
@@ -66,9 +66,7 @@ async def test_generate_data_plain_text(
 async def test_generate_data_api_error(hass: HomeAssistant, setup_ai_task, mock_client):
     """Test AI task with API error."""
 
-    mock_client.async_chat_completion.side_effect = GitHubCopilotClient.ApiError(
-        "Server error"
-    )
+    mock_client.async_chat_completion.side_effect = ApiError("Server error")
 
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(

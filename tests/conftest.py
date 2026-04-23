@@ -9,7 +9,11 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.github_copilot.api import GitHubCopilotClient, Model
+from custom_components.github_copilot.api import (
+    GitHubCopilotAuth,
+    GitHubCopilotClient,
+    Model,
+)
 from custom_components.github_copilot.const import (
     CONF_ACCESS_TOKEN,
     CONF_MODEL,
@@ -195,9 +199,16 @@ def mock_client():
     """Create a mock GitHubCopilotClient."""
 
     client = AsyncMock(spec=GitHubCopilotClient)
-    client.access_token = "gho_test_token_abc123"
-    client._access_token = "gho_test_token_abc123"
-    client.async_validate_token = AsyncMock(return_value=True)
+
+    # Set up auth mock
+    mock_auth = AsyncMock(spec=GitHubCopilotAuth)
+    mock_auth.access_token = "gho_test_token_abc123"
+    mock_auth._access_token = "gho_test_token_abc123"
+    mock_auth.async_validate_token = AsyncMock(return_value=True)
+    mock_auth.async_refresh_token = AsyncMock()
+    client.auth = mock_auth
+
+    # Client-level mocks
     client.async_validate_model = AsyncMock(return_value=True)
     client.async_list_models = AsyncMock(
         return_value=[
@@ -210,8 +221,6 @@ def mock_client():
         ]
     )
     client.async_chat_completion = AsyncMock(return_value=MOCK_CHAT_COMPLETION_RESPONSE)
-    client.async_refresh_token = AsyncMock()
-    client.async_close = AsyncMock()
     return client
 
 
@@ -224,8 +233,4 @@ def mock_setup_entry(mock_client):
         return_value=mock_client,
     ) as mock_cls:
         mock_cls.return_value = mock_client
-        mock_cls.AuthError = GitHubCopilotClient.AuthError
-        mock_cls.ConnectionError = GitHubCopilotClient.ConnectionError
-        mock_cls.async_initiate_device_flow = AsyncMock()
-        mock_cls.async_poll_for_token = AsyncMock()
         yield mock_cls

@@ -3,8 +3,11 @@
 from enum import StrEnum
 from typing import Final
 
-from homeassistant.const import Platform
+from homeassistant.const import CONF_LLM_HASS_API, Platform
 from homeassistant.helpers.llm import DEFAULT_INSTRUCTIONS_PROMPT
+from homeassistant.helpers.aiohttp_client import SERVER_SOFTWARE
+
+__all__ = ["CONF_LLM_HASS_API"]
 
 DOMAIN: Final = "github_copilot"
 
@@ -12,6 +15,8 @@ PLATFORMS: Final = (
     Platform.CONVERSATION,
     Platform.AI_TASK,
 )
+
+USER_AGENT: Final = f"{SERVER_SOFTWARE} GitHubCopilot/1.170.0"
 
 # Config keys
 CONF_ACCESS_TOKEN: Final = "access_token"
@@ -25,6 +30,7 @@ CONF_MAX_HISTORY: Final = "max_history"
 GITHUB_DEVICE_CODE_URL: Final = "https://github.com/login/device/code"
 GITHUB_TOKEN_URL: Final = "https://github.com/login/oauth/access_token"
 GITHUB_CLIENT_ID: Final = "01ab8ac9400c4e429b23"
+GITHUB_DEVICE_GRANT: Final = "urn:ietf:params:oauth:grant-type:device_code"
 
 # GitHub Copilot Internal API
 GITHUB_COPILOT_TOKEN_URL: Final = "https://api.github.com/copilot_internal/v2/token"
@@ -43,7 +49,7 @@ GITHUB_CHAT_COMPLETIONS_URL: Final = (
 
 # Defaults
 DEFAULT_MODEL: Final = "gpt-4.1"
-DEFAULT_NAME: Final = "GitHub Copilot"
+DEFAULT_NAME: Final = "GitHub Copilot Client"
 DEFAULT_CONVERSATION_NAME: Final = "GitHub Copilot Conversation"
 DEFAULT_AI_TASK_NAME: Final = "GitHub Copilot AI Task"
 DEFAULT_MAX_HISTORY: Final = 20
