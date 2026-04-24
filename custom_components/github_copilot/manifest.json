@@ -8,6 +8,6 @@
   "documentation": "https://github.com/zschoenstadt/homeassistant_github_copilot",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "requirements": [],
+  "requirements": ["github-copilot-sdk>=0.2.0"],
   "version": "0.1.0"
 }

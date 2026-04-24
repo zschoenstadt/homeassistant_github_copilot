@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -14,7 +14,12 @@ from custom_components.github_copilot.api import (
 
 
 async def test_async_setup_entry(
-    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_sdk_client,
+    mock_auth,
+    setup_ha,
 ):
     """Test successful setup of a config entry."""
 
@@ -25,9 +30,11 @@ async def test_async_setup_entry(
         ),
         patch(
             "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
         ),
         patch(
-            "custom_components.github_copilot.GitHubCopilotClient",
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
         ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -37,9 +44,14 @@ async def test_async_setup_entry(
 
 
 async def test_async_unload_entry(
-    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_sdk_client,
+    mock_auth,
+    setup_ha,
 ):
-    """Test unloading a config entry unloads platforms."""
+    """Test unloading a config entry stops the SDK client."""
 
     with (
         patch(
@@ -48,9 +60,11 @@ async def test_async_unload_entry(
         ),
         patch(
             "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
         ),
         patch(
-            "custom_components.github_copilot.GitHubCopilotClient",
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
         ),
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -61,12 +75,17 @@ async def test_async_unload_entry(
 
 
 async def test_setup_entry_auth_failed(
-    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_sdk_client,
+    mock_auth,
+    setup_ha,
 ):
     """Test setup with invalid token raises auth failed."""
 
-    mock_runtime.async_validate_tokens.side_effect = GitHubCopilotAuthError(
-        "Token invalid"
+    mock_runtime.async_validate_auth = AsyncMock(
+        side_effect=GitHubCopilotAuthError("Token invalid")
     )
 
     with (
@@ -76,9 +95,11 @@ async def test_setup_entry_auth_failed(
         ),
         patch(
             "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
         ),
         patch(
-            "custom_components.github_copilot.GitHubCopilotClient",
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
         ),
     ):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -88,12 +109,17 @@ async def test_setup_entry_auth_failed(
 
 
 async def test_setup_entry_not_ready(
-    hass: HomeAssistant, mock_config_entry, mock_runtime, setup_ha
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_sdk_client,
+    mock_auth,
+    setup_ha,
 ):
-    """Test setup when API is unreachable."""
+    """Test setup when SDK client cannot connect."""
 
-    mock_runtime.async_validate_tokens.side_effect = GitHubCopilotConnectionError(
-        "Cannot connect"
+    mock_runtime.async_validate_auth = AsyncMock(
+        side_effect=GitHubCopilotConnectionError("Cannot connect")
     )
 
     with (
@@ -103,9 +129,11 @@ async def test_setup_entry_not_ready(
         ),
         patch(
             "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
         ),
         patch(
-            "custom_components.github_copilot.GitHubCopilotClient",
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
         ),
     ):
         await hass.config_entries.async_setup(mock_config_entry.entry_id)

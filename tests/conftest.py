@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.setup import async_setup_component
 import pytest
@@ -11,8 +11,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.github_copilot.api import (
     GitHubCopilotAuth,
-    GitHubCopilotClient,
     GitHubCopilotModel,
+    GitHubCopilotSDKClient,
 )
 from custom_components.github_copilot.const import (
     CONF_ACCESS_TOKEN,
@@ -81,103 +81,9 @@ MOCK_TOKEN_DENIED_RESPONSE = {
     "error_description": "The user denied the authorization request.",
 }
 
-MOCK_MODELS_RESPONSE = [
-    {
-        "id": "gpt-4.1",
-        "name": "GPT-4.1",
-        "capabilities": ["streaming", "tool-calling"],
-    },
-    {
-        "id": "gpt-4.1-mini",
-        "name": "GPT-4.1 Mini",
-        "capabilities": ["streaming"],
-    },
-    {
-        "id": "anthropic/claude-sonnet-4",
-        "name": "Claude Sonnet 4",
-        "capabilities": ["streaming"],
-    },
-]
-
-# Copilot models endpoint wraps in {"object": "list", "data": [...]}
-MOCK_COPILOT_MODELS_RESPONSE = {
-    "object": "list",
-    "data": [
-        {
-            "id": "gpt-4.1",
-            "object": "model",
-            "created": 0,
-            "owned_by": "openai",
-            "display_name": "GPT-4.1",
-        },
-        {
-            "id": "gpt-4.1-mini",
-            "object": "model",
-            "created": 0,
-            "owned_by": "openai",
-            "display_name": "GPT-4.1 Mini",
-        },
-        {
-            "id": "claude-sonnet-4",
-            "object": "model",
-            "created": 0,
-            "owned_by": "anthropic",
-            "display_name": "Claude Sonnet 4",
-        },
-    ],
-}
-
-MOCK_COPILOT_TOKEN_RESPONSE = {
-    "token": "tid=copilot_test_token_abc123;exp=9999999999;sku=monthly",
-    "expires_at": int((datetime.now() + timedelta(hours=1)).timestamp()),
-}
-
-MOCK_CHAT_COMPLETION_RESPONSE = {
-    "id": "chatcmpl-test123",
-    "object": "chat.completion",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "Hello! How can I help you with your smart home?",
-            },
-            "finish_reason": "stop",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 12, "total_tokens": 22},
-}
-
-MOCK_CHAT_COMPLETION_JSON_RESPONSE = {
-    "id": "chatcmpl-test456",
-    "object": "chat.completion",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": '{"temperature": 22, "lights_on": true}',
-            },
-            "finish_reason": "stop",
-        }
-    ],
-}
-
-MOCK_STREAMING_CHUNKS = [
-    b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
-    b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
-    b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
-    b'data: {"choices":[{"delta":{"content":"!"}}]}\n\n',
-    b"data: [DONE]\n\n",
-]
-
 MOCK_MODELS = [
-    GitHubCopilotModel(id="gpt-4.1", name="GPT-4.1", capabilities=["streaming"]),
-    GitHubCopilotModel(
-        id="gpt-4.1-mini",
-        name="GPT-4.1 Mini",
-        capabilities=["streaming"],
-    ),
+    GitHubCopilotModel(id="gpt-4.1", name="GPT-4.1"),
+    GitHubCopilotModel(id="gpt-4.1-mini", name="GPT-4.1 Mini"),
 ]
 
 
@@ -207,44 +113,46 @@ def mock_config_entry(hass):
 
 
 @pytest.fixture
-def mock_client():
-    """Create a mock GitHubCopilotClient."""
+def mock_sdk_client():
+    """Create a mock GitHubCopilotSDKClient."""
 
-    client = AsyncMock(spec=GitHubCopilotClient)
-
-    # Set up auth mock
-    mock_auth = AsyncMock(spec=GitHubCopilotAuth)
-    mock_auth.access_token = "gho_test_token_abc123"
-    mock_auth.refresh_token = "ghr_test_refresh_xyz789"
-    mock_auth.async_ensure_copilot_token = AsyncMock(return_value="copilot_test_token")
-    mock_auth.async_refresh_token = AsyncMock()
-    client.auth = mock_auth
-
-    # Client-level mocks
-    client.async_validate_model = AsyncMock(return_value=True)
+    client = AsyncMock(spec=GitHubCopilotSDKClient)
+    client.async_start = AsyncMock()
+    client.async_stop = AsyncMock()
+    client.async_check_auth = AsyncMock(return_value=True)
     client.async_list_models = AsyncMock(return_value=MOCK_MODELS)
-    client.async_chat_completion = AsyncMock(return_value=MOCK_CHAT_COMPLETION_RESPONSE)
+    client.async_validate_model = AsyncMock(return_value=True)
+    client.update_token = MagicMock()
     return client
 
 
 @pytest.fixture
-def mock_runtime(hass, mock_config_entry, mock_client):
-    """Create a mock Runtime wrapping the mock client."""
+def mock_auth():
+    """Create a mock GitHubCopilotAuth."""
 
-    runtime = AsyncMock(spec=Runtime)
+    auth = AsyncMock(spec=GitHubCopilotAuth)
+    auth.access_token = "gho_test_token_abc123"
+    auth.refresh_token = "ghr_test_refresh_xyz789"
+    auth.async_refresh_token = AsyncMock()
+    return auth
+
+
+@pytest.fixture
+def mock_runtime(hass, mock_config_entry, mock_sdk_client, mock_auth):
+    """Create a mock Runtime wrapping the mock SDK client."""
+
+    runtime = MagicMock(spec=Runtime)
     runtime.hass = hass
     runtime.entry = mock_config_entry
-    runtime.ghc = mock_client
-
-    # Delegate chat completion to the mock client by default
-    runtime.async_chat_completion = mock_client.async_chat_completion
-    runtime.async_validate_tokens = AsyncMock()
-
+    runtime.sdk_client = mock_sdk_client
+    runtime.auth = mock_auth
+    runtime.async_validate_auth = AsyncMock()
+    runtime._async_update_tokens = AsyncMock()
     return runtime
 
 
 @pytest.fixture
-def mock_setup_entry(mock_runtime):
+def mock_setup_entry(mock_runtime, mock_sdk_client, mock_auth):
     """Mock the integration setup to inject mock runtime as runtime_data."""
 
     with (
@@ -253,9 +161,11 @@ def mock_setup_entry(mock_runtime):
         ) as mock_runtime_cls,
         patch(
             "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
         ),
         patch(
-            "custom_components.github_copilot.GitHubCopilotClient",
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
         ),
     ):
         mock_runtime_cls.return_value = mock_runtime

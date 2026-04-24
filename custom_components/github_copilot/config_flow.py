@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -27,13 +26,12 @@ from homeassistant.helpers.selector import (
 import voluptuous as vol
 
 from .api import (
-    GitHubCopilotApiError,
     GitHubCopilotAuth,
     GitHubCopilotAuthError,
-    GitHubCopilotClient,
     GitHubCopilotConnectionError,
     GitHubCopilotDeviceFlow,
     GitHubCopilotModel,
+    GitHubCopilotSDKClient,
 )
 from .const import (
     CONF_ACCESS_TOKEN,
@@ -62,8 +60,18 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
         super().__init__(*args, **kwargs)
         self._device_flow: GitHubCopilotDeviceFlow | None = None
-        self._ghc: GitHubCopilotClient | None = None
+        self._access_token: str | None = None
+        self._refresh_token: str | None = None
+        self._token_expiry: int | None = None
+        self._sdk_client: GitHubCopilotSDKClient | None = None
         self._models: list[GitHubCopilotModel] = []
+
+    async def _async_cleanup_sdk_client(self) -> None:
+        """Stop the temporary SDK client if active."""
+
+        if self._sdk_client is not None:
+            await self._sdk_client.async_stop()
+            self._sdk_client = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -97,9 +105,10 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.error("Unexpected error during device activation.", exc_info=ex)
                 return self.async_abort(reason="unknown_cannot_login")
 
-            self._ghc = GitHubCopilotClient(
-                session=auth.session, auth=auth
-            )
+            # Store auth credentials for later entry creation
+            self._access_token = auth.access_token
+            self._refresh_token = auth.refresh_token
+            self._token_expiry = auth.expiry
 
             return await self.async_step_model()
 
@@ -127,42 +136,50 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Let the user pick a default model."""
 
-        assert self._ghc is not None
         errors: dict[str, str] = {}
 
-        # TODO: Make model validation optional, since it costs 1 token
         if user_input is not None:
-            try:
-                if await self._ghc.async_validate_model(user_input[CONF_MODEL]):
-                    return self.async_create_entry(
-                        title="GitHub Copilot Client",
-                        data={
-                            CONF_ACCESS_TOKEN: self._ghc.auth.access_token,
-                            CONF_REFRESH_TOKEN: self._ghc.auth.refresh_token,
-                            CONF_TOKEN_EXPIRY: self._ghc.auth.expiry,
-                        },
-                        options={
-                            CONF_MODEL: user_input[CONF_MODEL],
-                        },
-                    )
-                errors[CONF_MODEL] = "model_no_access"
-            except GitHubCopilotConnectionError:
-                return await self.async_step_model_timeout()
-            except GitHubCopilotAuthError:
-                _LOGGER.exception("Unexpected error during model validation")
-                return self.async_abort(reason="auth_failure")
-            except Exception:
-                _LOGGER.exception("Unexpected error during model validation")
-                return self.async_abort(reason="unknown")
+            # Validate the selected model exists in the list
+            selected_model = user_input[CONF_MODEL]
+            if any(m.id == selected_model for m in self._models):
+                await self._async_cleanup_sdk_client()
+                return self.async_create_entry(
+                    title="GitHub Copilot Client",
+                    data={
+                        CONF_ACCESS_TOKEN: self._access_token,
+                        CONF_REFRESH_TOKEN: self._refresh_token,
+                        CONF_TOKEN_EXPIRY: self._token_expiry,
+                    },
+                    options={
+                        CONF_MODEL: selected_model,
+                    },
+                )
+            errors[CONF_MODEL] = "model_no_access"
 
-        # Fetch available models for the dropdown
+        # Start a temporary SDK client to list models
         if not self._models:
             try:
-                self._models = await self._ghc.async_list_models()
+                if self._sdk_client is None:
+                    # Create a temporary auth for the config flow SDK client
+                    temp_auth = GitHubCopilotAuth(
+                        async_get_clientsession(self.hass),
+                        access_token=self._access_token,
+                        refresh_token=self._refresh_token,
+                        expiry=self._token_expiry,
+                    )
+                    self._sdk_client = GitHubCopilotSDKClient(auth=temp_auth)
+                    await self._sdk_client.async_start()
+
+                self._models = await self._sdk_client.async_list_models()
             except GitHubCopilotAuthError:
+                await self._async_cleanup_sdk_client()
                 return self.async_abort(reason="auth_failure")
+            except GitHubCopilotConnectionError:
+                await self._async_cleanup_sdk_client()
+                return await self.async_step_model_timeout()
             except Exception:
                 _LOGGER.exception("Failed to fetch models.")
+                await self._async_cleanup_sdk_client()
                 return self.async_abort(reason="unknown_cannot_fetch_models")
 
         # Build the model selection form
@@ -221,22 +238,17 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
 
         errors: dict[str, str] = {}
         current_model = self.config_entry.options.get(CONF_MODEL)
-        ghc: GitHubCopilotClient = self.config_entry.runtime_data.ghc
+        sdk_client: GitHubCopilotSDKClient = self.config_entry.runtime_data.sdk_client
 
         if user_input is not None:
-            # Validate model access if the user changed the model
             new_model = user_input.get(CONF_MODEL, current_model)
 
-            # TODO: Make model validation optional since it costs 1 token
+            # Validate model exists if changed
             if new_model != current_model:
                 try:
-                    if not await ghc.async_validate_model(new_model):
+                    if not await sdk_client.async_validate_model(new_model):
                         errors[CONF_MODEL] = "model_no_access"
-                except (
-                    GitHubCopilotApiError,
-                    GitHubCopilotConnectionError,
-                    GitHubCopilotAuthError,
-                ):
+                except Exception:
                     _LOGGER.exception("Model validation failed for %s", new_model)
                     errors[CONF_MODEL] = "model_no_access"
 
@@ -246,7 +258,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         # Fetch available models for the dropdown
         if not self._models:
             try:
-                self._models = await ghc.async_list_models()
+                self._models = await sdk_client.async_list_models()
             except Exception:
                 _LOGGER.exception("Failed to fetch models.")
                 errors[CONF_MODEL] = "cannot_fetch_models"

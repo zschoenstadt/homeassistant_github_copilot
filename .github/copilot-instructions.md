@@ -69,6 +69,7 @@ Function bodies are organized into **paragraphs** — logical groups of lines se
 
 ## Conventions
 
+- **Branching**: When working on a new feature, use or create a branch named `copilot/<appropriate-feature-name>` before making changes.
 - All HTTP is mocked via `aioresponses` in tests — no real network calls
 - Config entry `runtime_data` holds the `GitHubCopilotClient` instance (typed via `ConfigEntry[GitHubCopilotClient]`)
 - Fixtures are in `tests/conftest.py`: `mock_config_entry`, `mock_client`, `mock_setup_entry`
