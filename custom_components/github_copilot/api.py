@@ -17,6 +17,7 @@ import logging
 
 import aiohttp
 from copilot import CopilotClient, SubprocessConfig
+from copilot._jsonrpc import JsonRpcError, ProcessExitedError
 from copilot.generated.session_events import SessionEvent
 from copilot.session import CopilotSession, PermissionHandler, Tool
 
@@ -331,7 +332,7 @@ class GitHubCopilotSDKClient:
         if self._client is not None:
             try:
                 await self._client.stop()
-            except (OSError, RuntimeError):
+            except (JsonRpcError, ProcessExitedError, OSError, RuntimeError):
                 _LOGGER.debug("Error stopping SDK client", exc_info=True)
             finally:
                 self._client = None
@@ -353,7 +354,7 @@ class GitHubCopilotSDKClient:
 
         try:
             status = await self.client.get_auth_status()
-        except (OSError, RuntimeError) as err:
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError) as err:
             raise GitHubCopilotConnectionError(
                 f"Failed to check auth status: {err}"
             ) from err
@@ -365,7 +366,7 @@ class GitHubCopilotSDKClient:
 
         try:
             models = await self.client.list_models()
-        except (OSError, RuntimeError) as err:
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError) as err:
             raise GitHubCopilotConnectionError(f"Failed to list models: {err}") from err
 
         return [GitHubCopilotModel(id=m.id, name=m.name) for m in models]
@@ -468,7 +469,7 @@ class GitHubCopilotSDKClient:
                 streaming=streaming,
                 on_event=on_event,
             )
-        except (RuntimeError, OSError):
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError):
             _LOGGER.debug("Session %s not found, creating new session", session_id)
 
         # Fall back to creating a fresh session

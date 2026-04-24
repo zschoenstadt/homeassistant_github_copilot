@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 import json
 import logging
 from typing import Any
+import uuid
 
 from copilot.generated.session_events import SessionEvent, SessionEventType
 from copilot.session import Tool
@@ -178,8 +179,13 @@ class GitHubCopilotBaseEntity(Entity):
         # Build the user prompt from the chat log's last user message
         user_prompt = self._extract_user_prompt(chat_log)
 
-        # Namespace the session ID to avoid collisions across config entries
-        session_id = f"{self.entry.entry_id}:{chat_log.conversation_id}"
+        # Derive a deterministic UUID from entry + conversation IDs.
+        # The CLI rejects arbitrary strings; uuid5 produces a valid UUID format.
+        session_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL, f"{self.entry.entry_id}:{chat_log.conversation_id}"
+            )
+        )
 
         # Queue for bridging SDK's sync event callbacks to async HA code
         event_queue: asyncio.Queue[SessionEvent | object] = asyncio.Queue()
