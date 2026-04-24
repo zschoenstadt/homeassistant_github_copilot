@@ -31,9 +31,9 @@ cd homeassistant_github_copilot
 # Build (defaults to HA stable, SDK 0.2.2)
 docker build -t ha-copilot -f docker/Dockerfile .
 
-# Or pin a specific HA version
+# Or pin a specific HA version and SDK version
 docker build -t ha-copilot -f docker/Dockerfile \
-  --build-arg HA_VERSION=2025.7.2 \
+  --build-arg HA_VERSION=2026.4.3 \
   --build-arg SDK_VERSION=0.2.2 .
 ```
 
@@ -54,12 +54,11 @@ docker run -d --name homeassistant \
 
 ### What the Dockerfile Does
 
-1. **Stage 1** — Extracts glibc + libstdc++ shared libraries from `debian:bookworm-slim`
-2. **Stage 2** — Extends the official HA Alpine image:
-   - Copies the Debian libraries to `/usr/glibc-compat/lib/`
-   - Symlinks the glibc dynamic linker to `/lib64/`
-   - Sets `LD_LIBRARY_PATH` so the SDK binary finds glibc at runtime
-   - Downloads and installs the `github-copilot-sdk` wheel
+Extends the official HA Alpine image with glibc compatibility:
+
+1. **gcompat + libstdc++ + libucontext** — Alpine packages providing the glibc ABI shim, C++ standard library, and context-switching functions
+2. **glibc shim library** — A small compiled shim (`glibc_shim.so`) providing `fcntl64` and `gnu_get_libc_version` — symbols the CLI binary expects but gcompat doesn't cover. On musl, `fcntl` is already 64-bit, so `fcntl64` is a simple forwarding wrapper.
+3. **Copilot SDK** — Downloads and extracts the `github-copilot-sdk` manylinux wheel (which bundles the CLI binary). Alpine's pip rejects manylinux platform tags, so the wheel is extracted directly.
 
 ### Updating the SDK
 
@@ -67,7 +66,7 @@ To update to a newer SDK version, rebuild with the new version:
 
 ```bash
 docker build -t ha-copilot -f docker/Dockerfile \
-  --build-arg SDK_VERSION=0.3.0 .
+  --build-arg SDK_VERSION=0.1.25 .
 ```
 
 ## Installation
