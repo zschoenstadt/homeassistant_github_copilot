@@ -386,7 +386,7 @@ class GitHubCopilotSDKClient:
         if not system_message:
             return None
 
-        return {"content": system_message, "mode": "append"}
+        return {"content": system_message, "mode": "replace"}
 
     async def async_create_session(
         self,
@@ -411,7 +411,6 @@ class GitHubCopilotSDKClient:
             model=model,
             system_message=self._build_system_message_config(system_message),
             tools=tools,
-            available_tools=[],
             streaming=streaming,
             on_event=on_event,
         )
@@ -421,23 +420,25 @@ class GitHubCopilotSDKClient:
         *,
         session_id: str,
         model: str,
+        system_message: str | None = None,
         tools: list[Tool] | None = None,
         streaming: bool = True,
         on_event: Callable[[SessionEvent], None] | None = None,
     ) -> CopilotSession:
         """Resume an existing SDK session by ID.
 
-        Conversation history is preserved on disk by the CLI.  Tools and event
-        handlers must be re-registered since they are in-memory only.  System
-        message is NOT re-sent — it was set during create.
+        Conversation history is preserved on disk by the CLI.  Tools, event
+        handlers, and system message must be re-sent since they are in-memory
+        only.  The system message is re-sent on every resume so it reflects
+        current entity states and area data.
         """
 
         return await self.client.resume_session(
             session_id=session_id,
             on_permission_request=PermissionHandler.approve_all,
             model=model,
+            system_message=self._build_system_message_config(system_message),
             tools=tools,
-            available_tools=[],
             streaming=streaming,
             on_event=on_event,
         )
@@ -465,6 +466,7 @@ class GitHubCopilotSDKClient:
             return await self.async_resume_session(
                 session_id=session_id,
                 model=model,
+                system_message=system_message,
                 tools=tools,
                 streaming=streaming,
                 on_event=on_event,
