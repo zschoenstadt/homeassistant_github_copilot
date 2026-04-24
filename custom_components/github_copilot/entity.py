@@ -262,8 +262,9 @@ class GitHubCopilotBaseEntity(Entity):
         chat_log.async_add_delta_content_stream().
         """
 
-        # Track whether we've yielded a role marker for the current message
+        # Track whether we've yielded a role marker and content for the current message
         role_yielded = False
+        content_yielded = False
 
         while True:
             try:
@@ -288,6 +289,7 @@ class GitHubCopilotBaseEntity(Entity):
                 delta = event.data.delta_content
                 if delta:
                     yield {"content": delta}
+                    content_yielded = True
 
             # Final assistant message (may contain tool requests)
             elif event.type == SessionEventType.ASSISTANT_MESSAGE:
@@ -295,8 +297,9 @@ class GitHubCopilotBaseEntity(Entity):
                     yield {"role": "assistant"}
                     role_yielded = True
 
-                # If the final message has content and we missed deltas
-                if event.data.content and not role_yielded:
+                # If the final message has content and no deltas were streamed,
+                # yield the full content so it isn't silently dropped.
+                if event.data.content and not content_yielded:
                     yield {"content": event.data.content}
 
                 # Emit tool calls as external (SDK handles execution)
@@ -315,6 +318,7 @@ class GitHubCopilotBaseEntity(Entity):
 
                 # Reset for next turn (after tool results)
                 role_yielded = False
+                content_yielded = False
 
             # Tool execution completed — record the result in chat log
             elif event.type == SessionEventType.TOOL_EXECUTION_COMPLETE:
