@@ -2,18 +2,19 @@
 
 ## Project Overview
 
-This is a **Home Assistant custom integration** (`github_copilot`) that connects GitHub Copilot as a conversation agent and AI task provider. It uses direct HTTP API calls (aiohttp) to GitHub's Models REST API — no SDK binary dependency.
+This is a **Home Assistant custom integration** (`github_copilot`) that connects GitHub Copilot as a conversation agent and AI task provider. It uses the **Copilot SDK** (`copilot` Python package), which spawns a bundled CLI binary as a subprocess and communicates via JSON-RPC. OAuth device flow still uses direct aiohttp calls to GitHub.
 
 ## Architecture
 
 ```
 custom_components/github_copilot/
-├── __init__.py       # Entry setup: creates API client, forwards platforms
-├── api.py            # GitHubCopilotClient: OAuth device flow, token refresh, chat completions
+├── __init__.py       # Entry setup: creates Auth + SDKClient, builds Runtime, forwards platforms
+├── api.py            # GitHubCopilotAuth, GitHubCopilotDeviceFlow, GitHubCopilotSDKClient
 ├── config_flow.py    # OAuth device flow UI: user → auth → model select → entry creation
-├── entity.py         # GitHubCopilotBaseEntity: shared LLM logic, ChatLog→messages conversion
-├── conversation.py   # ConversationEntity: _async_handle_message → API → ConversationResult
-├── ai_task.py        # AITaskEntity: _async_generate_data → API → GenDataTaskResult
+├── entity.py         # GitHubCopilotBaseEntity: SDK session management, event streaming, tool bridging
+├── conversation.py   # ConversationEntity: _async_handle_message → SDK session → ConversationResult
+├── ai_task.py        # AITaskEntity: _async_generate_data → SDK session → GenDataTaskResult
+├── runtime.py        # Runtime dataclass: holds Auth + SDKClient, handles token persistence
 ├── const.py          # Domain, URLs, config keys, defaults
 ```
 
@@ -21,10 +22,12 @@ The integration follows the same patterns as `openai_conversation` in HA core. W
 
 ## Key Patterns
 
-- **Entity base class**: `GitHubCopilotBaseEntity` in `entity.py` contains shared logic for converting `ChatLog` to API messages and calling the chat completions endpoint. Both `conversation.py` and `ai_task.py` inherit from it.
-- **Auth flow**: OAuth Device Flow implemented in `config_flow.py`. Tokens stored in config entry data (HA's encrypted `.storage/`). Token refresh handled in `api.py`.
+- **Entity base class**: `GitHubCopilotBaseEntity` in `entity.py` contains shared logic for SDK session management (resume-first pattern), converting HA LLM tools to SDK `Tool` objects, and streaming SDK `SessionEvent`s into HA's `ChatLog` delta content stream. Both `conversation.py` and `ai_task.py` inherit from it.
+- **SDK client**: `GitHubCopilotSDKClient` in `api.py` wraps the `CopilotClient` from the SDK. It manages the CLI subprocess lifecycle (start/stop/restart) and provides typed methods for auth checking, model listing, and session creation/resumption.
+- **Runtime dataclass**: `Runtime` in `runtime.py` bundles `GitHubCopilotAuth` and `GitHubCopilotSDKClient` together. It handles auth validation (with automatic token refresh + subprocess restart) and is stored as the config entry's `runtime_data`.
+- **Auth flow**: OAuth Device Flow implemented in `config_flow.py`. Tokens stored in config entry data (HA's encrypted `.storage/`). Token refresh handled by `GitHubCopilotAuth` in `api.py`. After refresh, `Runtime` persists new tokens and restarts the SDK subprocess.
 - **Config flow error recovery**: Auth errors during the device flow abort immediately — the user re-opens the flow to retry. Connection/timeout errors show a retry form (`login_timeout`) that loops back to `async_step_user` so the user can retry without restarting. Model timeout (`model_timeout`) follows the same pattern. This matches common HA core integration patterns.
-- **Error hierarchy**: `GitHubCopilotClient` defines `AuthError`, `ConnectionError`, `RateLimitError`, `ApiError`. The `__init__.py` maps `AuthError` → `ConfigEntryAuthFailed` and `ConnectionError` → `ConfigEntryNotReady`.
+- **Error hierarchy**: `api.py` defines `GitHubCopilotAuthError`, `GitHubCopilotConnectionError`, `GitHubCopilotRateLimitError`, `GitHubCopilotApiError`. The `__init__.py` maps `GitHubCopilotAuthError` → `ConfigEntryAuthFailed` and `GitHubCopilotConnectionError` → `ConfigEntryNotReady`.
 
 ## Build / Test / Lint
 
@@ -70,18 +73,17 @@ Function bodies are organized into **paragraphs** — logical groups of lines se
 ## Conventions
 
 - **Branching**: When working on a new feature, use or create a branch named `copilot/<appropriate-feature-name>` before making changes.
-- All HTTP is mocked via `aioresponses` in tests — no real network calls
-- Config entry `runtime_data` holds the `GitHubCopilotClient` instance (typed via `ConfigEntry[GitHubCopilotClient]`)
-- Fixtures are in `tests/conftest.py`: `mock_config_entry`, `mock_client`, `mock_setup_entry`
-- Mock API response constants (e.g., `MOCK_CHAT_COMPLETION_RESPONSE`) are defined in `conftest.py` and imported by test modules
+- OAuth HTTP calls are mocked via `aioresponses` in tests; SDK client interactions are mocked via `unittest.mock` (AsyncMock/MagicMock)
+- Config entry `runtime_data` holds a `Runtime` dataclass instance (typed via `ConfigEntry[Runtime]`)
+- Fixtures are in `tests/conftest.py`: `mock_config_entry`, `mock_sdk_client`, `mock_auth`, `mock_runtime`, `mock_setup_entry`
+- Mock API response constants (e.g., `MOCK_DEVICE_FLOW_RESPONSE`, `MOCK_TOKEN_RESPONSE`, `MOCK_MODELS`) are defined in `conftest.py` and imported by test modules
 - String translations go in both `strings.json` (source of truth) and `translations/en.json`
 
-## GitHub API Endpoints
+## GitHub OAuth Endpoints (direct HTTP)
 
 | Endpoint | Purpose |
 |----------|---------|
 | `POST https://github.com/login/device/code` | Initiate device flow |
 | `POST https://github.com/login/oauth/access_token` | Exchange/refresh tokens |
-| `POST https://api.github.com/copilot_internal/v2/token` | Exchange OAuth token for Copilot API token |
-| `GET https://api.githubcopilot.com/models` | List available models |
-| `POST https://api.githubcopilot.com/chat/completions` | Chat completions |
+
+All other Copilot API communication (auth status, model listing, chat completions) is handled by the SDK's bundled CLI subprocess.
