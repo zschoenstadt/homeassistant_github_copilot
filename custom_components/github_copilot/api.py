@@ -35,7 +35,7 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # Timeout for waiting on SDK session responses
 SESSION_RESPONSE_TIMEOUT = 120
 
-type AsyncRefreshCallback = Callable[[str, str | None, int | None], Awaitable[None]]
+type AsyncRefreshCallback = Callable[[str, str | None, str | None], Awaitable[None]]
 
 
 class GitHubCopilotAuthError(Exception):
@@ -160,8 +160,10 @@ class GitHubCopilotDeviceFlow:
                             self._session,
                             access_token=data["access_token"],
                             refresh_token=data.get("refresh_token"),
-                            expiry=datetime.now()
-                            + timedelta(seconds=data.get("expires_in", 0)),
+                            expiry=(
+                                datetime.now()
+                                + timedelta(seconds=data.get("expires_in", 0))
+                            ).isoformat(),
                         )
 
                     # Handle polling-specific error codes
@@ -203,7 +205,7 @@ class GitHubCopilotAuth:
         session: aiohttp.ClientSession,
         access_token: str,
         refresh_token: str | None,
-        expiry: int,
+        expiry: str | None,
     ) -> None:
         """Initialize the auth manager."""
 
@@ -226,8 +228,8 @@ class GitHubCopilotAuth:
         return self._refresh_token
 
     @property
-    def expiry(self) -> int:
-        """Return the current GitHub OAuth expiration."""
+    def expiry(self) -> str | None:
+        """Return the current GitHub OAuth expiration as ISO 8601 string."""
 
         return self._expiry
 
@@ -264,9 +266,10 @@ class GitHubCopilotAuth:
                         self._refresh_token = data.get(
                             "refresh_token", self._refresh_token
                         )
-                        self._expiry = datetime.now() + timedelta(
-                            seconds=data.get("expires_in", 0),
-                        )
+                        self._expiry = (
+                            datetime.now()
+                            + timedelta(seconds=data.get("expires_in", 0))
+                        ).isoformat()
 
                         await async_callback(
                             self._access_token,

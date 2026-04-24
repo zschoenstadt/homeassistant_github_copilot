@@ -21,7 +21,6 @@ CONF_REFRESH_TOKEN: Final = "refresh_token"
 CONF_TOKEN_EXPIRY: Final = "token_expiry"
 CONF_MODEL: Final = "model"
 CONF_PROMPT: Final = "prompt"
-CONF_MAX_HISTORY: Final = "max_history"
 
 # GitHub OAuth — VS Code public app (device flow, no secret needed)
 GITHUB_DEVICE_CODE_URL: Final = "https://github.com/login/device/code"
@@ -34,7 +33,6 @@ DEFAULT_MODEL: Final = "gpt-4.1"
 DEFAULT_NAME: Final = "GitHub Copilot Client"
 DEFAULT_CONVERSATION_NAME: Final = "GitHub Copilot Conversation"
 DEFAULT_AI_TASK_NAME: Final = "GitHub Copilot AI Task"
-DEFAULT_MAX_HISTORY: Final = 20
 
 DEFAULT_SYSTEM_PROMPT: Final = DEFAULT_INSTRUCTIONS_PROMPT
 

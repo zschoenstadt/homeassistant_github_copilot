@@ -40,13 +40,11 @@
         "data": {
           "model": "Model",
           "prompt": "Instructions",
-          "llm_hass_api": "Control Home Assistant",
-          "max_history": "Max history messages (0 = unlimited)"
+          "llm_hass_api": "Control Home Assistant"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
-          "llm_hass_api": "Allow the model to interact with Home Assistant (e.g., control devices, get states).",
-          "max_history": "Maximum number of previous conversation turns to include. 0 = unlimited."
+          "llm_hass_api": "Allow the model to interact with Home Assistant (e.g., control devices, get states)."
         }
       }
     }

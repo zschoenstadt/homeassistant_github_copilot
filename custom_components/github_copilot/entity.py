@@ -219,15 +219,15 @@ class GitHubCopilotBaseEntity(Entity):
             ):
                 pass
 
-            # Disconnect to release in-memory resources but keep session on disk
-            await session.disconnect()
-
         except TimeoutError as err:
-            # Disconnect on timeout — session can be resumed next turn
-            await session.disconnect()
             raise TimeoutError(
                 "Timed out waiting for response from GitHub Copilot"
             ) from err
+
+        finally:
+            # Always disconnect to release in-memory resources.
+            # Session state persists on disk and can be resumed next turn.
+            await session.disconnect()
 
     def _extract_system_message(self, chat_log: ChatLog) -> str:
         """Extract the system message from a ChatLog."""

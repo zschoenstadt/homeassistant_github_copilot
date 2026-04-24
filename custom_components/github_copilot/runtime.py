@@ -27,7 +27,7 @@ class Runtime:
         self,
         access_token: str,
         refresh_token: str | None,
-        expiry: int | None,
+        expiry: str | None,
     ) -> None:
         """Persist refreshed tokens to the config entry."""
 
