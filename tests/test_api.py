@@ -452,7 +452,7 @@ async def test_sdk_client_create_session():
         await client.async_start()
 
         session = await client.async_create_session(
-            session_id="test:conv-123",
+            session_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             model="gpt-4.1",
             system_message="You are helpful.",
         )
