@@ -456,3 +456,52 @@ async def test_sdk_client_connection_error_on_check_auth():
 
         with pytest.raises(GitHubCopilotConnectionError):
             await client.async_check_auth()
+
+
+async def test_sdk_client_context_manager():
+    """Test that async with starts and stops the client."""
+
+    mock_copilot_client = AsyncMock()
+    mock_copilot_client.start = AsyncMock()
+    mock_copilot_client.stop = AsyncMock()
+
+    mock_status = MagicMock()
+    mock_status.isAuthenticated = True
+    mock_copilot_client.get_auth_status = AsyncMock(return_value=mock_status)
+
+    with patch(
+        "custom_components.github_copilot.api.CopilotClient",
+        return_value=mock_copilot_client,
+    ):
+        async with _make_sdk_client() as client:
+            # Client should be started inside the context
+            mock_copilot_client.start.assert_called_once()
+            assert client._client is not None
+
+            result = await client.async_check_auth()
+            assert result is True
+
+        # Client should be stopped after exiting the context
+        mock_copilot_client.stop.assert_called_once()
+
+
+async def test_sdk_client_context_manager_stops_on_exception():
+    """Test that async with stops the client even when an exception occurs."""
+
+    mock_copilot_client = AsyncMock()
+    mock_copilot_client.start = AsyncMock()
+    mock_copilot_client.stop = AsyncMock()
+    mock_copilot_client.list_models = AsyncMock(
+        side_effect=OSError("Connection refused")
+    )
+
+    with patch(
+        "custom_components.github_copilot.api.CopilotClient",
+        return_value=mock_copilot_client,
+    ):
+        with pytest.raises(GitHubCopilotConnectionError):
+            async with _make_sdk_client() as client:
+                await client.async_list_models()
+
+        # Client must be stopped even though an exception was raised
+        mock_copilot_client.stop.assert_called_once()

@@ -91,6 +91,10 @@ def mock_flow_sdk_client():
     mock_client.async_validate_model = AsyncMock(return_value=True)
     mock_client.async_list_models = AsyncMock(return_value=MOCK_MODELS)
 
+    # Support async with protocol
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
     with patch(
         "custom_components.github_copilot.config_flow.GitHubCopilotSDKClient",
         return_value=mock_client,
@@ -370,6 +374,8 @@ async def test_flow_model_fetch_connection_error(
     mock_client = AsyncMock(spec=GitHubCopilotSDKClient)
     mock_client.async_start = AsyncMock()
     mock_client.async_stop = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
 
     # First call: connection error. Second call: success.
     mock_client.async_list_models = AsyncMock(
@@ -414,6 +420,8 @@ async def test_flow_model_auth_error_aborts(
     mock_client = AsyncMock(spec=GitHubCopilotSDKClient)
     mock_client.async_start = AsyncMock()
     mock_client.async_stop = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.async_list_models = AsyncMock(
         side_effect=GitHubCopilotAuthError("Token expired")
     )
@@ -473,6 +481,8 @@ async def test_flow_model_fetch_failure(
     mock_client = AsyncMock(spec=GitHubCopilotSDKClient)
     mock_client.async_start = AsyncMock()
     mock_client.async_stop = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.async_list_models = AsyncMock(side_effect=Exception("API unreachable"))
 
     with patch(

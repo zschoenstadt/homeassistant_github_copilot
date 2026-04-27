@@ -58,15 +58,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._token_expiry: str | None = None
-        self._sdk_client: GitHubCopilotSDKClient | None = None
         self._models: list[GitHubCopilotModel] = []
-
-    async def _async_cleanup_sdk_client(self) -> None:
-        """Stop the temporary SDK client if active."""
-
-        if self._sdk_client is not None:
-            await self._sdk_client.async_stop()
-            self._sdk_client = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -137,7 +129,6 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
             # Validate the selected model exists in the list
             selected_model = user_input[CONF_MODEL]
             if any(m.id == selected_model for m in self._models):
-                await self._async_cleanup_sdk_client()
                 return self.async_create_entry(
                     title="GitHub Copilot Client",
                     data={
@@ -151,30 +142,25 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             errors[CONF_MODEL] = "model_no_access"
 
-        # Start a temporary SDK client to list models
+        # Start a temporary SDK client to list models.
+        # async with ensures the subprocess is always cleaned up.
         if not self._models:
-            try:
-                if self._sdk_client is None:
-                    # Create a temporary auth for the config flow SDK client
-                    temp_auth = GitHubCopilotAuth(
-                        async_get_clientsession(self.hass),
-                        access_token=self._access_token,
-                        refresh_token=self._refresh_token,
-                        expiry=self._token_expiry,
-                    )
-                    self._sdk_client = GitHubCopilotSDKClient(auth=temp_auth)
-                    await self._sdk_client.async_start()
+            temp_auth = GitHubCopilotAuth(
+                async_get_clientsession(self.hass),
+                access_token=self._access_token,
+                refresh_token=self._refresh_token,
+                expiry=self._token_expiry,
+            )
 
-                self._models = await self._sdk_client.async_list_models()
+            try:
+                async with GitHubCopilotSDKClient(auth=temp_auth) as client:
+                    self._models = await client.async_list_models()
             except GitHubCopilotAuthError:
-                await self._async_cleanup_sdk_client()
                 return self.async_abort(reason="auth_failure")
             except GitHubCopilotConnectionError:
-                await self._async_cleanup_sdk_client()
                 return await self.async_step_model_timeout()
             except Exception:
                 _LOGGER.exception("Failed to fetch models.")
-                await self._async_cleanup_sdk_client()
                 return self.async_abort(reason="unknown_cannot_fetch_models")
 
         # Build the model selection form
