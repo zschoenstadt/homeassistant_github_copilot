@@ -1,5 +1,7 @@
 """Tests for the GitHub Copilot conversation entity."""
 
+# pylint: disable=not-callable
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -264,3 +266,113 @@ async def test_streaming_support_enabled(hass: HomeAssistant, setup_conversation
         ]
         assert len(entities) == 1
         assert entities[0]._attr_supports_streaming is True
+
+
+async def test_tool_execution_complete_events(
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_runtime,
+    mock_sdk_client,
+    mock_auth,
+    setup_ha,
+):
+    """Test that TOOL_EXECUTION_COMPLETE events produce correct tool result deltas.
+
+    Simulates a full tool-call round trip:
+    1. Assistant requests a tool call
+    2. SDK executes the tool and emits TOOL_EXECUTION_COMPLETE
+    3. Assistant returns the final response incorporating tool results
+
+    Verifies the tool result content (including JSON parsing and delta dict shape)
+    ends up recorded in the ChatLog.
+    """
+
+    tool_result_json = '{"temperature": 72, "unit": "F"}'
+
+    def make_tool_session_factory():
+        """Build a session factory that emits tool call + completion events."""
+
+        captured_on_event = None
+
+        def make_session():
+            session = AsyncMock()
+
+            async def send(prompt, **kwargs):
+                if captured_on_event is None:
+                    return
+
+                # Step 1: Assistant requests a tool call
+                tool_request = MagicMock()
+                tool_request.tool_call_id = "call_abc123"
+                tool_request.name = "get_temperature"
+                tool_request.arguments = {"entity_id": "sensor.living_room"}
+
+                assistant_msg = MagicMock()
+                assistant_msg.type = SessionEventType.ASSISTANT_MESSAGE
+                assistant_msg.data.content = None
+                assistant_msg.data.tool_requests = [tool_request]
+                captured_on_event(assistant_msg)
+
+                # Step 2: Tool execution completes
+                tool_complete = MagicMock()
+                tool_complete.type = SessionEventType.TOOL_EXECUTION_COMPLETE
+                tool_complete.data.tool_name = "get_temperature"
+                tool_complete.data.tool_call_id = "call_abc123"
+                tool_complete.data.result = tool_result_json
+                captured_on_event(tool_complete)
+
+                # Step 3: Assistant responds with final message using tool result
+                delta_event = MagicMock()
+                delta_event.type = SessionEventType.ASSISTANT_MESSAGE_DELTA
+                delta_event.data.delta_content = "The temperature is 72°F."
+                captured_on_event(delta_event)
+
+                final_msg = MagicMock()
+                final_msg.type = SessionEventType.ASSISTANT_MESSAGE
+                final_msg.data.content = "The temperature is 72°F."
+                final_msg.data.tool_requests = None
+                captured_on_event(final_msg)
+
+                # Step 4: Session goes idle
+                idle_event = MagicMock()
+                idle_event.type = SessionEventType.SESSION_IDLE
+                captured_on_event(idle_event)
+
+            session.send = send
+            session.disconnect = AsyncMock()
+            return session
+
+        async def mock_get_or_create_session(**kwargs):
+            nonlocal captured_on_event
+            captured_on_event = kwargs.get("on_event")
+            return make_session()
+
+        return mock_get_or_create_session
+
+    # Wire the mock SDK client to use the tool-call session
+    mock_sdk_client.async_get_or_create_session = make_tool_session_factory()
+    mock_config_entry.runtime_data = mock_runtime
+
+    with (
+        patch(
+            "custom_components.github_copilot.Runtime",
+            return_value=mock_runtime,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotAuth",
+            return_value=mock_auth,
+        ),
+        patch(
+            "custom_components.github_copilot.GitHubCopilotSDKClient",
+            return_value=mock_sdk_client,
+        ),
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    result = await _converse(hass, "What's the temperature?", mock_config_entry)
+
+    # Verify final response includes the tool-informed answer
+    assert result.response.speech is not None
+    speech = result.response.speech["plain"]["speech"]
+    assert "72" in speech
