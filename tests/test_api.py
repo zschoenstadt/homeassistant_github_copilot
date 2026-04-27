@@ -196,7 +196,7 @@ async def test_auth_refresh_token_success(aiohttp_mock):
             session=session,
             access_token="gho_old_token",
             refresh_token="ghr_old_refresh",
-            expiry=0,
+            expiry=None,
         )
 
         callback = AsyncMock()
@@ -204,6 +204,8 @@ async def test_auth_refresh_token_success(aiohttp_mock):
 
         assert auth.access_token == "gho_refreshed_token"
         assert auth.refresh_token == "ghr_new_refresh"
+        assert auth.expiry is not None
+        assert auth.is_expired is False
         callback.assert_called_once()
     finally:
         await session.close()
@@ -217,7 +219,7 @@ async def test_auth_refresh_token_no_refresh_token():
         session=session,
         access_token="gho_test",
         refresh_token=None,
-        expiry=0,
+        expiry=None,
     )
 
     with pytest.raises(GitHubCopilotAuthError, match="No refresh token"):
@@ -238,13 +240,55 @@ async def test_auth_refresh_token_error(aiohttp_mock):
             session=session,
             access_token="gho_old",
             refresh_token="ghr_bad",
-            expiry=0,
+            expiry=None,
         )
 
         with pytest.raises(GitHubCopilotAuthError, match="refresh failed"):
             await auth.async_refresh_token(AsyncMock())
     finally:
         await session.close()
+
+
+async def test_auth_is_expired_with_past_expiry():
+    """Test is_expired returns True when expiry is in the past."""
+
+    session = AsyncMock(spec=aiohttp.ClientSession)
+    auth = GitHubCopilotAuth(
+        session=session,
+        access_token="gho_test",
+        refresh_token=None,
+        expiry="2020-01-01T00:00:00",
+    )
+
+    assert auth.is_expired is True
+
+
+async def test_auth_is_expired_with_future_expiry():
+    """Test is_expired returns False when expiry is in the future."""
+
+    session = AsyncMock(spec=aiohttp.ClientSession)
+    auth = GitHubCopilotAuth(
+        session=session,
+        access_token="gho_test",
+        refresh_token=None,
+        expiry="2099-12-31T23:59:59",
+    )
+
+    assert auth.is_expired is False
+
+
+async def test_auth_is_expired_with_no_expiry():
+    """Test is_expired returns False when token has no expiry (never expires)."""
+
+    session = AsyncMock(spec=aiohttp.ClientSession)
+    auth = GitHubCopilotAuth(
+        session=session,
+        access_token="gho_test",
+        refresh_token=None,
+        expiry=None,
+    )
+
+    assert auth.is_expired is False
 
 
 # ── SDK Client Tests ──

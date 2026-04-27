@@ -27,6 +27,7 @@ def local_auth():
     auth = AsyncMock(spec=GitHubCopilotAuth)
     auth.access_token = "gho_test_token_abc123"
     auth.refresh_token = "ghr_test_refresh_xyz789"
+    auth.is_expired = False
     auth.async_refresh_token = AsyncMock()
     return auth
 
@@ -66,6 +67,20 @@ async def test_validate_auth_success(runtime, local_sdk_client):
     local_sdk_client.async_check_auth.assert_called_once()
 
 
+async def test_validate_auth_proactive_refresh_on_expired(
+    runtime, local_auth, local_sdk_client
+):
+    """Test that expired OAuth token triggers proactive refresh without SDK check."""
+
+    local_auth.is_expired = True
+
+    await runtime.async_validate_auth()
+
+    # Should refresh immediately without asking the SDK
+    local_auth.async_refresh_token.assert_called_once()
+    local_sdk_client.async_check_auth.assert_not_called()
+
+
 async def test_validate_auth_refresh_on_failure(runtime, local_auth, local_sdk_client):
     """Test auth validation triggers refresh when initial check fails."""
 
@@ -74,7 +89,7 @@ async def test_validate_auth_refresh_on_failure(runtime, local_auth, local_sdk_c
 
     # Make the mock actually call the callback to trigger restart
     async def fake_refresh(callback):
-        await callback("new_token", "new_refresh", 9999)
+        await callback("new_token", "new_refresh", "2026-12-31T23:59:59")
 
     local_auth.async_refresh_token.side_effect = fake_refresh
 
@@ -124,12 +139,12 @@ async def test_update_tokens_persists_data(
     await runtime._async_update_tokens(
         access_token="new_access_token",
         refresh_token="new_refresh_token",
-        expiry=1234567890,
+        expiry="2026-12-31T23:59:59",
     )
 
     assert mock_config_entry.data[CONF_ACCESS_TOKEN] == "new_access_token"
     assert mock_config_entry.data[CONF_REFRESH_TOKEN] == "new_refresh_token"
-    assert mock_config_entry.data[CONF_TOKEN_EXPIRY] == 1234567890
+    assert mock_config_entry.data[CONF_TOKEN_EXPIRY] == "2026-12-31T23:59:59"
 
     # SDK subprocess should be restarted to pick up the new token
     local_sdk_client.async_restart.assert_called_once()
@@ -172,7 +187,7 @@ async def test_validate_auth_refresh_invokes_callback(
 
     # Make async_refresh_token call the callback with new values
     async def fake_refresh(callback):
-        await callback("new_access", "new_refresh", 9999999)
+        await callback("new_access", "new_refresh", "2026-12-31T23:59:59")
 
     local_auth.async_refresh_token.side_effect = fake_refresh
 
@@ -186,4 +201,4 @@ async def test_validate_auth_refresh_invokes_callback(
 
     assert mock_config_entry.data[CONF_ACCESS_TOKEN] == "new_access"
     assert mock_config_entry.data[CONF_REFRESH_TOKEN] == "new_refresh"
-    assert mock_config_entry.data[CONF_TOKEN_EXPIRY] == 9999999
+    assert mock_config_entry.data[CONF_TOKEN_EXPIRY] == "2026-12-31T23:59:59"

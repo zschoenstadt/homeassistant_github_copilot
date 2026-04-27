@@ -163,9 +163,13 @@ class GitHubCopilotDeviceFlow:
                             access_token=data["access_token"],
                             refresh_token=data.get("refresh_token"),
                             expiry=(
-                                datetime.now()
-                                + timedelta(seconds=data.get("expires_in", 0))
-                            ).isoformat(),
+                                (
+                                    datetime.now()
+                                    + timedelta(seconds=data["expires_in"])
+                                ).isoformat()
+                                if "expires_in" in data
+                                else None
+                            ),
                         )
 
                     # Handle polling-specific error codes
@@ -236,6 +240,18 @@ class GitHubCopilotAuth:
         return self._expiry
 
     @property
+    def is_expired(self) -> bool:
+        """Check if the OAuth token has expired.
+
+        Returns False if no expiry is set (token does not expire).
+        """
+
+        if self._expiry is None:
+            return False
+
+        return datetime.now() >= datetime.fromisoformat(self._expiry)
+
+    @property
     def session(self) -> aiohttp.ClientSession:
         """Return the current session."""
 
@@ -269,9 +285,12 @@ class GitHubCopilotAuth:
                             "refresh_token", self._refresh_token
                         )
                         self._expiry = (
-                            datetime.now()
-                            + timedelta(seconds=data.get("expires_in", 0))
-                        ).isoformat()
+                            (
+                                datetime.now() + timedelta(seconds=data["expires_in"])
+                            ).isoformat()
+                            if "expires_in" in data
+                            else None
+                        )
 
                         await async_callback(
                             self._access_token,

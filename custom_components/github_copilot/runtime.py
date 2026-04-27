@@ -49,10 +49,17 @@ class Runtime:
     async def async_validate_auth(self) -> None:
         """Validate authentication by checking with the SDK.
 
-        Attempts a token refresh if the initial check fails.
+        Proactively refreshes if the OAuth token is known to be expired,
+        then falls back to SDK auth check with refresh on failure.
         """
 
-        # Check if the current token is valid
+        # Proactively refresh if we already know the token is expired
+        if self.auth.is_expired:
+            _LOGGER.info("OAuth token expired, refreshing before SDK check")
+            await self.auth.async_refresh_token(self._async_update_tokens)
+            return
+
+        # Check if the current token is valid via the SDK
         authenticated = await self.sdk_client.async_check_auth()
         if authenticated:
             return

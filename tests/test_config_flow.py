@@ -59,7 +59,7 @@ def _make_mock_device_flow(
             mock_auth.session = AsyncMock(spec=aiohttp.ClientSession)
             mock_auth.access_token = "gho_test_token_abc123"
             mock_auth.refresh_token = "ghr_test_refresh_xyz789"
-            mock_auth.expiry = 9999999999
+            mock_auth.expiry = "2099-12-31T23:59:59"
             activation_result = mock_auth
         mock_flow.async_device_activation = AsyncMock(return_value=activation_result)
 
@@ -211,7 +211,7 @@ async def test_flow_login_timeout_retry(
     mock_auth.session = AsyncMock(spec=aiohttp.ClientSession)
     mock_auth.access_token = "gho_test_token_abc123"
     mock_auth.refresh_token = "ghr_test_refresh_xyz789"
-    mock_auth.expiry = 9999999999
+    mock_auth.expiry = "2099-12-31T23:59:59"
 
     # First call raises connection error; second succeeds
     activation_calls = 0
