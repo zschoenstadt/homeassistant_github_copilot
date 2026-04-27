@@ -15,9 +15,6 @@ from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    NumberSelector,
-    NumberSelectorConfig,
-    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -36,12 +33,10 @@ from .api import (
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_LLM_HASS_API,
-    CONF_MAX_HISTORY,
     CONF_MODEL,
     CONF_PROMPT,
     CONF_REFRESH_TOKEN,
     CONF_TOKEN_EXPIRY,
-    DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     DOMAIN,
@@ -62,7 +57,7 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
         self._device_flow: GitHubCopilotDeviceFlow | None = None
         self._access_token: str | None = None
         self._refresh_token: str | None = None
-        self._token_expiry: int | None = None
+        self._token_expiry: str | None = None
         self._sdk_client: GitHubCopilotSDKClient | None = None
         self._models: list[GitHubCopilotModel] = []
 
@@ -292,22 +287,6 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                         description={"suggested_value": selected_llm_apis},
                     ): SelectSelector(
                         SelectSelectorConfig(options=hass_llm_apis, multiple=True)
-                    ),
-                    vol.Optional(
-                        CONF_MAX_HISTORY,
-                        description={
-                            "suggested_value": self.config_entry.options.get(
-                                CONF_MAX_HISTORY,
-                                DEFAULT_MAX_HISTORY,
-                            ),
-                        },
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=1000,
-                            step=1,
-                            mode=NumberSelectorMode.BOX,
-                        )
                     ),
                 }
             ),
