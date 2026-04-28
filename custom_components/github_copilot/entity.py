@@ -272,9 +272,11 @@ class GitHubCopilotBaseEntity(Entity):
                     event_queue.get(),
                     timeout=SESSION_RESPONSE_TIMEOUT,
                 )
-            except TimeoutError:
+            except TimeoutError as err:
                 _LOGGER.error("Timed out waiting for SDK event")
-                break
+                raise HomeAssistantError(
+                    "Timed out waiting for GitHub Copilot SDK response"
+                ) from err
 
             # End of stream
             if event is _STREAM_DONE:

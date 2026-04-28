@@ -66,7 +66,7 @@ To update to a newer SDK version, rebuild with the new version:
 
 ```bash
 docker build -t ha-copilot -f docker/Dockerfile \
-  --build-arg SDK_VERSION=0.1.25 .
+  --build-arg SDK_VERSION=0.2.3 .
 ```
 
 ## Installation
