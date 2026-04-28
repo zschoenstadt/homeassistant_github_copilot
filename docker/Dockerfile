@@ -60,8 +60,9 @@ RUN pip download --no-cache-dir \
         --only-binary :all: \
         --dest /tmp/sdk-wheel \
         github-copilot-sdk==${SDK_VERSION} \
-    && unzip -o /tmp/sdk-wheel/github_copilot_sdk*.whl \
-        -d "$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+    && python3 -m zipfile -e \
+        "$(ls /tmp/sdk-wheel/github_copilot_sdk*.whl)" \
+        "$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
     && rm -rf /tmp/sdk-wheel
 
 # Wrap the CLI binary so LD_PRELOAD only applies to it, not the

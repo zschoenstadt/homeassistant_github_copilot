@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
@@ -326,13 +325,6 @@ class GitHubCopilotSDKClient:
         self._auth = auth
         self._client: CopilotClient | None = None
         self._restart_lock = asyncio.Lock()
-
-    def __del__(self) -> None:
-        """Best-effort synchronous cleanup if not properly closed."""
-
-        if self._client is not None:
-            with contextlib.suppress(RuntimeError, OSError):
-                self._client.stop()
 
     async def __aenter__(self) -> Self:
         """Start the SDK client for use as an async context manager."""
