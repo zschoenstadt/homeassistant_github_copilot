@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,9 +15,6 @@ from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
-    NumberSelector,
-    NumberSelectorConfig,
-    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -27,23 +23,20 @@ from homeassistant.helpers.selector import (
 import voluptuous as vol
 
 from .api import (
-    GitHubCopilotApiError,
     GitHubCopilotAuth,
     GitHubCopilotAuthError,
-    GitHubCopilotClient,
     GitHubCopilotConnectionError,
     GitHubCopilotDeviceFlow,
     GitHubCopilotModel,
+    GitHubCopilotSDKClient,
 )
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_LLM_HASS_API,
-    CONF_MAX_HISTORY,
     CONF_MODEL,
     CONF_PROMPT,
     CONF_REFRESH_TOKEN,
     CONF_TOKEN_EXPIRY,
-    DEFAULT_MAX_HISTORY,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     DOMAIN,
@@ -62,7 +55,9 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
         super().__init__(*args, **kwargs)
         self._device_flow: GitHubCopilotDeviceFlow | None = None
-        self._ghc: GitHubCopilotClient | None = None
+        self._access_token: str | None = None
+        self._refresh_token: str | None = None
+        self._token_expiry: str | None = None
         self._models: list[GitHubCopilotModel] = []
 
     async def async_step_user(
@@ -97,9 +92,10 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.error("Unexpected error during device activation.", exc_info=ex)
                 return self.async_abort(reason="unknown_cannot_login")
 
-            self._ghc = GitHubCopilotClient(
-                session=auth.session, auth=auth
-            )
+            # Store auth credentials for later entry creation
+            self._access_token = auth.access_token
+            self._refresh_token = auth.refresh_token
+            self._token_expiry = auth.expiry
 
             return await self.async_step_model()
 
@@ -127,40 +123,42 @@ class GitHubCopilotConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Let the user pick a default model."""
 
-        assert self._ghc is not None
         errors: dict[str, str] = {}
 
-        # TODO: Make model validation optional, since it costs 1 token
         if user_input is not None:
+            # Validate the selected model exists in the list
+            selected_model = user_input[CONF_MODEL]
+            if any(m.id == selected_model for m in self._models):
+                return self.async_create_entry(
+                    title="GitHub Copilot Client",
+                    data={
+                        CONF_ACCESS_TOKEN: self._access_token,
+                        CONF_REFRESH_TOKEN: self._refresh_token,
+                        CONF_TOKEN_EXPIRY: self._token_expiry,
+                    },
+                    options={
+                        CONF_MODEL: selected_model,
+                    },
+                )
+            errors[CONF_MODEL] = "model_no_access"
+
+        # Start a temporary SDK client to list models.
+        # async with ensures the subprocess is always cleaned up.
+        if not self._models:
+            temp_auth = GitHubCopilotAuth(
+                async_get_clientsession(self.hass),
+                access_token=self._access_token,
+                refresh_token=self._refresh_token,
+                expiry=self._token_expiry,
+            )
+
             try:
-                if await self._ghc.async_validate_model(user_input[CONF_MODEL]):
-                    return self.async_create_entry(
-                        title="GitHub Copilot Client",
-                        data={
-                            CONF_ACCESS_TOKEN: self._ghc.auth.access_token,
-                            CONF_REFRESH_TOKEN: self._ghc.auth.refresh_token,
-                            CONF_TOKEN_EXPIRY: self._ghc.auth.expiry,
-                        },
-                        options={
-                            CONF_MODEL: user_input[CONF_MODEL],
-                        },
-                    )
-                errors[CONF_MODEL] = "model_no_access"
+                async with GitHubCopilotSDKClient(auth=temp_auth) as client:
+                    self._models = await client.async_list_models()
+            except GitHubCopilotAuthError:
+                return self.async_abort(reason="auth_failure")
             except GitHubCopilotConnectionError:
                 return await self.async_step_model_timeout()
-            except GitHubCopilotAuthError:
-                _LOGGER.exception("Unexpected error during model validation")
-                return self.async_abort(reason="auth_failure")
-            except Exception:
-                _LOGGER.exception("Unexpected error during model validation")
-                return self.async_abort(reason="unknown")
-
-        # Fetch available models for the dropdown
-        if not self._models:
-            try:
-                self._models = await self._ghc.async_list_models()
-            except GitHubCopilotAuthError:
-                return self.async_abort(reason="auth_failure")
             except Exception:
                 _LOGGER.exception("Failed to fetch models.")
                 return self.async_abort(reason="unknown_cannot_fetch_models")
@@ -221,22 +219,17 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
 
         errors: dict[str, str] = {}
         current_model = self.config_entry.options.get(CONF_MODEL)
-        ghc: GitHubCopilotClient = self.config_entry.runtime_data.ghc
+        sdk_client: GitHubCopilotSDKClient = self.config_entry.runtime_data.sdk_client
 
         if user_input is not None:
-            # Validate model access if the user changed the model
             new_model = user_input.get(CONF_MODEL, current_model)
 
-            # TODO: Make model validation optional since it costs 1 token
+            # Validate model exists if changed
             if new_model != current_model:
                 try:
-                    if not await ghc.async_validate_model(new_model):
+                    if not await sdk_client.async_validate_model(new_model):
                         errors[CONF_MODEL] = "model_no_access"
-                except (
-                    GitHubCopilotApiError,
-                    GitHubCopilotConnectionError,
-                    GitHubCopilotAuthError,
-                ):
+                except Exception:
                     _LOGGER.exception("Model validation failed for %s", new_model)
                     errors[CONF_MODEL] = "model_no_access"
 
@@ -246,7 +239,7 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
         # Fetch available models for the dropdown
         if not self._models:
             try:
-                self._models = await ghc.async_list_models()
+                self._models = await sdk_client.async_list_models()
             except Exception:
                 _LOGGER.exception("Failed to fetch models.")
                 errors[CONF_MODEL] = "cannot_fetch_models"
@@ -280,22 +273,6 @@ class GitHubCopilotOptionsFlow(OptionsFlow):
                         description={"suggested_value": selected_llm_apis},
                     ): SelectSelector(
                         SelectSelectorConfig(options=hass_llm_apis, multiple=True)
-                    ),
-                    vol.Optional(
-                        CONF_MAX_HISTORY,
-                        description={
-                            "suggested_value": self.config_entry.options.get(
-                                CONF_MAX_HISTORY,
-                                DEFAULT_MAX_HISTORY,
-                            ),
-                        },
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=1000,
-                            step=1,
-                            mode=NumberSelectorMode.BOX,
-                        )
                     ),
                 }
             ),

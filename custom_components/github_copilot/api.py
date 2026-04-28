@@ -1,42 +1,42 @@
 """GitHub Copilot API client.
 
-Two-step auth:
+Auth flow:
 1. GitHub OAuth token (long-lived, from device flow with VS Code client_id)
-2. Copilot API token (short-lived, exchanged via copilot_internal/v2/token)
+2. Token passed to Copilot SDK → bundled CLI handles all Copilot API communication
+
+The SDK spawns a CLI binary as a subprocess and communicates via JSON-RPC.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import json
 import logging
-from typing import Any
+from typing import Self
 
 import aiohttp
+from copilot import CopilotClient, SubprocessConfig
+from copilot._jsonrpc import JsonRpcError, ProcessExitedError
+from copilot.generated.session_events import SessionEvent
+from copilot.session import CopilotSession, PermissionHandler, Tool
 
 from .const import (
     GITHUB_CLIENT_ID,
-    GITHUB_COPILOT_CHAT_COMPLETIONS_URL,
-    GITHUB_COPILOT_MODELS_URL,
-    GITHUB_COPILOT_TOKEN_URL,
     GITHUB_DEVICE_CODE_URL,
     GITHUB_DEVICE_GRANT,
     GITHUB_TOKEN_URL,
-    USER_AGENT,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
-STREAM_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
-# Safety margin: refresh Copilot token 60s before expiry
-TOKEN_SAFETY_MARGIN = 60
+# Timeout for waiting on SDK session responses
+SESSION_RESPONSE_TIMEOUT = 120
 
-type AsyncRefreshCallback = Callable[[str, str | None, int | None], Awaitable[None]]
+type AsyncRefreshCallback = Callable[[str, str | None, str | None], Awaitable[None]]
 
 
 class GitHubCopilotAuthError(Exception):
@@ -61,12 +61,15 @@ class GitHubCopilotModel:
 
     id: str
     name: str
-    capabilities: list[str]
 
 
 class GitHubCopilotDeviceFlow:
+    """OAuth device flow for GitHub authentication."""
+
     @staticmethod
-    async def async_initiate(session: aiohttp.ClientSession) -> GitHubCopilotDeviceFlow:
+    async def async_initiate(
+        session: aiohttp.ClientSession,
+    ) -> GitHubCopilotDeviceFlow:
         """Initiate the OAuth device flow."""
 
         # Request a device code from GitHub
@@ -120,6 +123,7 @@ class GitHubCopilotDeviceFlow:
     @property
     def user_code(self) -> str:
         """Return the current GitHub OAuth device code."""
+
         return self._user_code
 
     @property
@@ -157,8 +161,14 @@ class GitHubCopilotDeviceFlow:
                             self._session,
                             access_token=data["access_token"],
                             refresh_token=data.get("refresh_token"),
-                            expiry=datetime.now()
-                            + timedelta(seconds=data.get("expires_in", 0)),
+                            expiry=(
+                                (
+                                    datetime.now()
+                                    + timedelta(seconds=data["expires_in"])
+                                ).isoformat()
+                                if "expires_in" in data
+                                else None
+                            ),
                         )
 
                     # Handle polling-specific error codes
@@ -189,14 +199,18 @@ class GitHubCopilotDeviceFlow:
 
 
 class GitHubCopilotAuth:
-    """Manages GitHub OAuth and Copilot API token lifecycle."""
+    """Manages GitHub OAuth token lifecycle.
+
+    The SDK/CLI handles Copilot token exchange internally — we only
+    need to manage the long-lived OAuth token and its refresh cycle.
+    """
 
     def __init__(
         self,
         session: aiohttp.ClientSession,
         access_token: str,
         refresh_token: str | None,
-        expiry: int,
+        expiry: str | None,
     ) -> None:
         """Initialize the auth manager."""
 
@@ -206,24 +220,35 @@ class GitHubCopilotAuth:
         self._expiry = expiry
         self._refresh_lock = asyncio.Lock()
 
-        # Short-lived Copilot API token (exchanged from OAuth token)
-        self._copilot_token: str | None = None
-        self._copilot_token_expiry: datetime | None = None
-
     @property
     def access_token(self) -> str:
         """Return the current GitHub OAuth access token."""
+
         return self._access_token
 
     @property
-    def refresh_token(self) -> str:
+    def refresh_token(self) -> str | None:
         """Return the current GitHub OAuth refresh token."""
+
         return self._refresh_token
 
     @property
-    def expiry(self) -> int:
-        """Return the current GitHub OAuth expiration."""
+    def expiry(self) -> str | None:
+        """Return the current GitHub OAuth expiration as ISO 8601 string."""
+
         return self._expiry
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if the OAuth token has expired.
+
+        Returns False if no expiry is set (token does not expire).
+        """
+
+        if self._expiry is None:
+            return False
+
+        return datetime.now() >= datetime.fromisoformat(self._expiry)
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -239,7 +264,6 @@ class GitHubCopilotAuth:
 
         # Serialize concurrent refresh attempts
         async with self._refresh_lock:
-            # Send the refresh request to GitHub
             session = self._session
             try:
                 async with session.post(
@@ -253,20 +277,19 @@ class GitHubCopilotAuth:
                     timeout=REQUEST_TIMEOUT,
                 ) as resp:
                     data = await resp.json()
-
                     if "access_token" in data:
                         # Update internal state with new credentials
                         self._access_token = data["access_token"]
                         self._refresh_token = data.get(
                             "refresh_token", self._refresh_token
                         )
-                        self._expiry = datetime.now() + timedelta(
-                            seconds=data.get("expires_in", 0),
+                        self._expiry = (
+                            (
+                                datetime.now() + timedelta(seconds=data["expires_in"])
+                            ).isoformat()
+                            if "expires_in" in data
+                            else None
                         )
-
-                        # Invalidate Copilot token so it gets re-exchanged
-                        self._copilot_token = None
-                        self._copilot_token_expiry = None
 
                         await async_callback(
                             self._access_token,
@@ -283,304 +306,214 @@ class GitHubCopilotAuth:
                     f"Connection error during token refresh: {err}"
                 ) from err
 
-    async def async_ensure_copilot_token(self) -> str:
-        """Get a valid Copilot API token, refreshing if needed."""
 
-        # Return cached token if it's still valid
-        if (
-            self._copilot_token
-            and self._copilot_token_expiry
-            and datetime.now() < self._copilot_token_expiry
-        ):
-            return self._copilot_token
+class GitHubCopilotSDKClient:
+    """Wraps the Copilot SDK client for use in Home Assistant.
 
-        # Exchange the OAuth token for a short-lived Copilot API token
-        try:
-            async with self._session.get(
-                GITHUB_COPILOT_TOKEN_URL,
-                headers={
-                    "Authorization": f"token {self._access_token}",
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json",
-                },
-                timeout=REQUEST_TIMEOUT,
-            ) as resp:
-                if resp.status == 401:
-                    raise GitHubCopilotAuthError(
-                        "GitHub OAuth token is invalid or expired."
-                    )
-                if resp.status == 403:
-                    text = await resp.text()
-                    raise GitHubCopilotAuthError(
-                        f"No Copilot access for this account: {text}"
-                    )
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise GitHubCopilotApiError(
-                        f"Copilot token exchange failed {resp.status}: {text}"
-                    )
+    Manages the lifecycle of the bundled CLI subprocess and provides
+    typed methods for auth validation, model listing, and session creation.
 
-                # Cache the new token with a safety margin before expiry
-                data = await resp.json()
-                self._copilot_token = data["token"]
-                self._copilot_token_expiry = datetime.fromtimestamp(
-                    data.get("expires_at", 0) - TOKEN_SAFETY_MARGIN
-                )
-                return self._copilot_token
+    Holds a reference to ``GitHubCopilotAuth`` so the subprocess is always
+    started with the latest OAuth token after a refresh cycle.  SDK sessions
+    persist on disk across subprocess restarts, so a token-refresh restart
+    does not lose conversation history.
+    """
 
-        except (TimeoutError, aiohttp.ClientError) as err:
-            raise GitHubCopilotConnectionError(
-                f"Failed to obtain Copilot token: {err}"
-            ) from err
+    def __init__(self, auth: GitHubCopilotAuth) -> None:
+        """Initialize with an auth manager."""
 
-
-class GitHubCopilotClient:
-    """Async client for GitHub Copilot API operations."""
-
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        auth: GitHubCopilotAuth,
-    ) -> None:
-        """Initialize the client."""
-
-        self._session = session
         self._auth = auth
+        self._client: CopilotClient | None = None
+        self._restart_lock = asyncio.Lock()
+
+    async def __aenter__(self) -> Self:
+        """Start the SDK client for use as an async context manager."""
+
+        await self.async_start()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Stop the SDK client when exiting the context manager."""
+
+        await self.async_stop()
 
     @property
-    def auth(self) -> GitHubCopilotAuth:
-        """Return the auth manager."""
+    def client(self) -> CopilotClient:
+        """Return the underlying SDK client, raising if not started."""
 
-        return self._auth
+        if self._client is None:
+            raise GitHubCopilotConnectionError("SDK client not started.")
 
-    ### HTTP Helpers ###
+        return self._client
 
-    def copilot_headers(self, copilot_token: str) -> dict[str, str]:
-        """Return headers for Copilot API requests."""
+    async def async_start(self) -> None:
+        """Start the SDK client and its CLI subprocess.
 
-        return {
-            "Authorization": f"Bearer {copilot_token}",
-            "Copilot-Integration-Id": "vscode-chat",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        Reads the current token from the auth manager, so a prior
+        token refresh is automatically picked up.
+        """
 
-    async def _raise_for_status(
-        self, resp: aiohttp.ClientResponse, context: str
-    ) -> None:
-        """Raise typed exceptions for non-success HTTP status codes."""
+        config = SubprocessConfig(
+            github_token=self._auth.access_token,
+            use_logged_in_user=False,
+        )
+        self._client = CopilotClient(config)
+        await self._client.start()
 
-        if resp.status == 401:
-            raise GitHubCopilotAuthError(f"{context}: token invalid.")
+    async def async_stop(self) -> None:
+        """Stop the SDK client and terminate the CLI subprocess."""
 
-        if resp.status == 429:
-            raise GitHubCopilotRateLimitError("Rate limit exceeded.")
+        if self._client is not None:
+            try:
+                await self._client.stop()
+            except (JsonRpcError, ProcessExitedError, OSError, RuntimeError):
+                _LOGGER.debug("Error stopping SDK client", exc_info=True)
+            finally:
+                self._client = None
 
-        if resp.status >= 400:
-            text = await resp.text()
-            raise GitHubCopilotApiError(f"{context} {resp.status}: {text}")
+    async def async_restart(self) -> None:
+        """Restart the subprocess with the current auth token.
 
-    ### Models API ###
+        Serialized by a lock so concurrent callers (e.g. multiple entities
+        hitting an auth error at once) only restart once.  SDK session state
+        survives on disk, so ``resume_session`` will still work after this.
+        """
+
+        async with self._restart_lock:
+            await self.async_stop()
+            await self.async_start()
+
+    async def async_check_auth(self) -> bool:
+        """Check if the current token is authenticated."""
+
+        try:
+            status = await self.client.get_auth_status()
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError) as err:
+            raise GitHubCopilotConnectionError(
+                f"Failed to check auth status: {err}"
+            ) from err
+
+        return status.isAuthenticated
 
     async def async_list_models(self) -> list[GitHubCopilotModel]:
         """List available models from the Copilot API."""
 
-        # Ensure valid auth and get a session
-        copilot_token = await self._auth.async_ensure_copilot_token()
-
-        # Fetch and parse the models catalog
         try:
-            async with self._session.get(
-                GITHUB_COPILOT_MODELS_URL,
-                headers=self.copilot_headers(copilot_token),
-                timeout=REQUEST_TIMEOUT,
-            ) as resp:
-                await self._raise_for_status(resp, "Models API error")
-
-                # Copilot endpoint wraps models: {"object": "list", "data": [...]}
-                data = await resp.json()
-                models_list = data.get("data", data) if isinstance(data, dict) else data
-
-                return [
-                    GitHubCopilotModel(
-                        id=m["id"],
-                        name=m.get("display_name", m.get("name", m["id"])),
-                        capabilities=m.get("capabilities", []),
-                    )
-                    for m in models_list
-                    if isinstance(m, dict) and "id" in m
-                ]
-
-        except (TimeoutError, aiohttp.ClientError) as err:
+            models = await self.client.list_models()
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError) as err:
             raise GitHubCopilotConnectionError(f"Failed to list models: {err}") from err
 
-    async def async_validate_model(self, model: str) -> bool:
-        """Validate that the given model is accessible."""
+        return [GitHubCopilotModel(id=m.id, name=m.name) for m in models]
 
-        # Ensure valid auth and get a session
-        copilot_token = await self._auth.async_ensure_copilot_token()
-        session = self._session
+    async def async_validate_model(self, model_id: str) -> bool:
+        """Validate that a model is available."""
 
-        # Send a minimal request to test model access
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        }
+        models = await self.async_list_models()
+        return any(m.id == model_id for m in models)
 
-        try:
-            async with session.post(
-                GITHUB_COPILOT_CHAT_COMPLETIONS_URL,
-                json=payload,
-                headers=self.copilot_headers(copilot_token),
-                timeout=REQUEST_TIMEOUT,
-            ) as resp:
-                if resp.status == 401:
-                    raise GitHubCopilotAuthError("Copilot token is invalid or expired.")
-                if resp.status == 403:
-                    return False
-                if resp.status == 429:
-                    return True
-                if resp.status >= 400:
-                    return False
-                return True
-
-        except (TimeoutError, aiohttp.ClientError) as err:
-            raise GitHubCopilotConnectionError(
-                f"Failed to validate model: {err}"
-            ) from err
-
-    def _build_chat_payload(
+    def _build_system_message_config(
         self,
-        messages: list[dict[str, Any]],
-        model: str,
-        *,
-        stream: bool,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Build the payload dict for a chat completion request."""
+        system_message: str | None,
+    ) -> dict[str, str] | None:
+        """Build the system message config dict for the SDK."""
 
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-        }
+        if not system_message:
+            return None
 
-        if temperature is not None:
-            payload["temperature"] = temperature
+        return {"content": system_message, "mode": "replace"}
 
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        if tools:
-            payload["tools"] = tools
-
-        return payload
-
-    async def async_chat_completion(
+    async def async_create_session(
         self,
-        messages: list[dict[str, Any]],
-        model: str,
         *,
-        stream: bool = False,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Send a chat completion request (non-streaming)."""
+        session_id: str,
+        model: str,
+        system_message: str | None = None,
+        tools: list[Tool] | None = None,
+        streaming: bool = True,
+        on_event: Callable[[SessionEvent], None] | None = None,
+    ) -> CopilotSession:
+        """Create a new SDK session with an explicit ID.
 
-        # Ensure we have a valid Copilot API token and session
-        copilot_token = await self._auth.async_ensure_copilot_token()
-        session = self._session
+        The session ID should be namespaced (e.g. ``entry_id:conversation_id``)
+        to avoid collisions.  System message is set here and persists for the
+        lifetime of the session — callers should not re-send it on resume.
+        """
 
-        # Build the request payload
-        payload = self._build_chat_payload(
-            messages,
-            model,
-            stream=False,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        return await self.client.create_session(
+            session_id=session_id,
+            on_permission_request=PermissionHandler.approve_all,
+            model=model,
+            system_message=self._build_system_message_config(system_message),
             tools=tools,
+            streaming=streaming,
+            on_event=on_event,
         )
 
-        # Send request and handle HTTP-level errors
-        try:
-            async with session.post(
-                GITHUB_COPILOT_CHAT_COMPLETIONS_URL,
-                json=payload,
-                headers=self.copilot_headers(copilot_token),
-                timeout=REQUEST_TIMEOUT,
-            ) as resp:
-                await self._raise_for_status(resp, "Chat completion error")
-
-                return await resp.json()
-
-        except (TimeoutError, aiohttp.ClientError) as err:
-            raise GitHubCopilotConnectionError(
-                f"Chat completion request failed: {err}"
-            ) from err
-
-    async def async_chat_completion_stream(
+    async def async_resume_session(
         self,
-        messages: list[dict[str, str]],
-        model: str,
         *,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> AsyncGenerator[str]:
-        """Send a streaming chat completion request, yielding content chunks."""
+        session_id: str,
+        model: str,
+        system_message: str | None = None,
+        tools: list[Tool] | None = None,
+        streaming: bool = True,
+        on_event: Callable[[SessionEvent], None] | None = None,
+    ) -> CopilotSession:
+        """Resume an existing SDK session by ID.
 
-        # Ensure we have a valid Copilot API token and session
-        copilot_token = await self._auth.async_ensure_copilot_token()
-        session = self._session
+        Conversation history is preserved on disk by the CLI.  Tools, event
+        handlers, and system message must be re-sent since they are in-memory
+        only.  The system message is re-sent on every resume so it reflects
+        current entity states and area data.
+        """
 
-        # Build the streaming request payload
-        payload = self._build_chat_payload(
-            messages,
-            model,
-            stream=True,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        return await self.client.resume_session(
+            session_id=session_id,
+            on_permission_request=PermissionHandler.approve_all,
+            model=model,
+            system_message=self._build_system_message_config(system_message),
+            tools=tools,
+            streaming=streaming,
+            on_event=on_event,
         )
 
-        # Stream the response and yield content chunks from SSE events
+    async def async_get_or_create_session(
+        self,
+        *,
+        session_id: str,
+        model: str,
+        system_message: str | None = None,
+        tools: list[Tool] | None = None,
+        streaming: bool = True,
+        on_event: Callable[[SessionEvent], None] | None = None,
+    ) -> CopilotSession:
+        """Resume a session if it exists, otherwise create a new one.
+
+        This is the primary entry point for entity code.  It tries resume
+        first (no in-memory tracking needed), and falls back to create if
+        the session doesn't exist on disk.  System message is only applied
+        on initial creation.
+        """
+
+        # Try resuming first — this is the common path for ongoing conversations
         try:
-            async with session.post(
-                GITHUB_COPILOT_CHAT_COMPLETIONS_URL,
-                json=payload,
-                headers=self.copilot_headers(copilot_token),
-                timeout=STREAM_TIMEOUT,
-            ) as resp:
-                await self._raise_for_status(resp, "Chat completion error")
+            return await self.async_resume_session(
+                session_id=session_id,
+                model=model,
+                system_message=system_message,
+                tools=tools,
+                streaming=streaming,
+                on_event=on_event,
+            )
+        except (JsonRpcError, ProcessExitedError, OSError, RuntimeError):
+            _LOGGER.debug("Session %s not found, creating new session", session_id)
 
-                # Parse SSE lines and extract content deltas
-                async for line in resp.content:
-                    decoded = line.decode("utf-8").strip()
-                    if not decoded or not decoded.startswith("data: "):
-                        continue
-
-                    data_str = decoded[6:]
-                    if data_str == "[DONE]":
-                        break
-
-                    try:
-                        chunk = json.loads(data_str)
-                        choices = chunk.get("choices", [])
-                        if choices:
-                            delta = choices[0].get("delta", {})
-                            content = delta.get("content")
-                            if content:
-                                yield content
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        _LOGGER.debug(
-                            "Skipping malformed SSE chunk: %s",
-                            data_str,
-                        )
-                        continue
-
-        except (TimeoutError, aiohttp.ClientError) as err:
-            raise GitHubCopilotConnectionError(
-                f"Streaming request failed: {err}"
-            ) from err
+        # Fall back to creating a fresh session
+        return await self.async_create_session(
+            session_id=session_id,
+            model=model,
+            system_message=system_message,
+            tools=tools,
+            streaming=streaming,
+            on_event=on_event,
+        )

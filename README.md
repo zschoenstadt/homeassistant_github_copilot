@@ -15,10 +15,65 @@
 
 - Home Assistant 2025.7.0+
 - A GitHub account with an active Copilot subscription
+- **Docker (x86_64)**: A custom container image is required — see [Docker Deployment](#docker-deployment) below
+
+## Docker Deployment
+
+The Copilot SDK ships a native CLI binary linked against **glibc**. Home Assistant's official Docker image uses **Alpine Linux (musl libc)**, so the binary won't run out of the box. This project includes a `docker/Dockerfile` that builds a custom HA image with the necessary glibc compatibility layer.
+
+### Building the Custom Image
+
+```bash
+# Clone this repo
+git clone https://github.com/zschoenstadt/homeassistant_github_copilot.git
+cd homeassistant_github_copilot
+
+# Build (defaults to HA stable, SDK 0.2.2)
+docker build -t ha-copilot -f docker/Dockerfile .
+
+# Or pin a specific HA version and SDK version
+docker build -t ha-copilot -f docker/Dockerfile \
+  --build-arg HA_VERSION=2026.4.3 \
+  --build-arg SDK_VERSION=0.2.2 .
+```
+
+### Running
+
+Replace your existing HA container image with `ha-copilot`. Everything else stays the same:
+
+```bash
+docker run -d --name homeassistant \
+  --restart=unless-stopped \
+  -v /path/to/ha-config:/config \
+  -e TZ=America/New_York \
+  -p 8123:8123 \
+  ha-copilot
+```
+
+> **Note:** When Home Assistant releases a new version, rebuild the image with the updated `HA_VERSION` build arg.
+
+### What the Dockerfile Does
+
+Extends the official HA Alpine image with glibc compatibility:
+
+1. **gcompat + libstdc++ + libucontext** — Alpine packages providing the glibc ABI shim, C++ standard library, and context-switching functions
+2. **glibc shim library** — A small compiled shim (`glibc_shim.so`) providing `fcntl64` and `gnu_get_libc_version` — symbols the CLI binary expects but gcompat doesn't cover. On musl, `fcntl` is already 64-bit, so `fcntl64` is a simple forwarding wrapper.
+3. **Copilot SDK** — Downloads and extracts the `github-copilot-sdk` manylinux wheel (which bundles the CLI binary). Alpine's pip rejects manylinux platform tags, so the wheel is extracted directly.
+
+### Updating the SDK
+
+To update to a newer SDK version, rebuild with the new version:
+
+```bash
+docker build -t ha-copilot -f docker/Dockerfile \
+  --build-arg SDK_VERSION=0.2.3 .
+```
 
 ## Installation
 
 ### HACS (Recommended)
+
+> **Important:** You must be running the custom Docker image (see above) for the SDK binary to work.
 
 1. Open HACS in Home Assistant
 2. Click **Integrations** → **⋮** → **Custom repositories**
@@ -28,8 +83,9 @@
 
 ### Manual
 
-1. Copy `custom_components/github_copilot/` to your HA `config/custom_components/` directory
-2. Restart Home Assistant
+1. Ensure you're running the custom Docker image (see [Docker Deployment](#docker-deployment))
+2. Copy `custom_components/github_copilot/` to your HA `config/custom_components/` directory
+3. Restart Home Assistant
 
 ## Setup
 

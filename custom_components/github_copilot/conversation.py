@@ -34,7 +34,7 @@ class GitHubCopilotConversationEntity(
     """GitHub Copilot conversation agent."""
 
     _attr_name = DEFAULT_CONVERSATION_NAME
-    _attr_supports_streaming = False
+    _attr_supports_streaming = True
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the conversation entity."""

@@ -5,7 +5,6 @@ from typing import Final
 
 from homeassistant.const import CONF_LLM_HASS_API, Platform
 from homeassistant.helpers.llm import DEFAULT_INSTRUCTIONS_PROMPT
-from homeassistant.helpers.aiohttp_client import SERVER_SOFTWARE
 
 __all__ = ["CONF_LLM_HASS_API"]
 
@@ -16,15 +15,12 @@ PLATFORMS: Final = (
     Platform.AI_TASK,
 )
 
-USER_AGENT: Final = f"{SERVER_SOFTWARE} GitHubCopilot/1.170.0"
-
 # Config keys
 CONF_ACCESS_TOKEN: Final = "access_token"
 CONF_REFRESH_TOKEN: Final = "refresh_token"
 CONF_TOKEN_EXPIRY: Final = "token_expiry"
 CONF_MODEL: Final = "model"
 CONF_PROMPT: Final = "prompt"
-CONF_MAX_HISTORY: Final = "max_history"
 
 # GitHub OAuth — VS Code public app (device flow, no secret needed)
 GITHUB_DEVICE_CODE_URL: Final = "https://github.com/login/device/code"
@@ -32,28 +28,11 @@ GITHUB_TOKEN_URL: Final = "https://github.com/login/oauth/access_token"
 GITHUB_CLIENT_ID: Final = "01ab8ac9400c4e429b23"
 GITHUB_DEVICE_GRANT: Final = "urn:ietf:params:oauth:grant-type:device_code"
 
-# GitHub Copilot Internal API
-GITHUB_COPILOT_TOKEN_URL: Final = "https://api.github.com/copilot_internal/v2/token"
-GITHUB_COPILOT_API_BASE: Final = "https://api.githubcopilot.com"
-GITHUB_COPILOT_MODELS_URL: Final = f"{GITHUB_COPILOT_API_BASE}/models"
-GITHUB_COPILOT_CHAT_COMPLETIONS_URL: Final = (
-    f"{GITHUB_COPILOT_API_BASE}/chat/completions"
-)
-
-# Legacy GitHub Models API (kept for reference)
-GITHUB_MODELS_API_BASE: Final = "https://models.github.ai"
-GITHUB_MODELS_CATALOG_URL: Final = f"{GITHUB_MODELS_API_BASE}/catalog/models"
-GITHUB_CHAT_COMPLETIONS_URL: Final = (
-    f"{GITHUB_MODELS_API_BASE}/inference/chat/completions"
-)
-
 # Defaults
 DEFAULT_MODEL: Final = "gpt-4.1"
 DEFAULT_NAME: Final = "GitHub Copilot Client"
 DEFAULT_CONVERSATION_NAME: Final = "GitHub Copilot Conversation"
 DEFAULT_AI_TASK_NAME: Final = "GitHub Copilot AI Task"
-DEFAULT_MAX_HISTORY: Final = 20
-MAX_TOOL_ITERATIONS: Final = 10
 
 DEFAULT_SYSTEM_PROMPT: Final = DEFAULT_INSTRUCTIONS_PROMPT
 
